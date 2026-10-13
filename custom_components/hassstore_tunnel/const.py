@@ -46,6 +46,11 @@ API_HEARTBEAT: Final = f"{API_CLIENT_BASE}/heartbeat"
 API_USAGE: Final = f"{API_CLIENT_BASE}/usage"
 API_EVENT: Final = f"{API_CLIENT_BASE}/event"
 
+# --- 公开发布清单（不需要令牌；config_flow 用来预填 binary_sha256）----------------
+# 后端 ``internal/handler/tunnel_release.go Manifest``：
+#   {version, mirror_base, binaries: {arch: {sha256, size, url}}}
+API_RELEASE_MANIFEST: Final = "/api/v1/tunnel/release/manifest"
+
 # --- 本地客户端（hs-frpc）CLI 契约 ------------------------------------------
 # 与 ha/apps/tunnel/run.sh、ha/README.md「统一 CLI 契约」一节 **必须逐字一致**。
 # 契约（`docs/design/02-tunnel-service.md` §9.4 + 附录 B）：

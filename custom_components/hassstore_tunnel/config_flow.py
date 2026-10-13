@@ -52,6 +52,15 @@ from .const import (
 from .supervisor import async_supervisor_available
 
 
+def _release_arch() -> str:
+    """本机架构 → 发布清单键名（HA 容器内 ``platform.machine()``）。
+
+    宽容映射：未知机器一律按 ``aarch64`` 兜底（HA 已不支持 32 位），
+    只用来挑 manifest 预填值；真正的硬校验在 ``local_process.detect_arch``。
+    """
+    return "amd64" if platform.machine().lower() in {"x86_64", "amd64"} else "aarch64"
+
+
 class HassStoreTunnelConfigFlow(ConfigFlow, domain=DOMAIN):
     """Handle the initial setup and reauth."""
 
@@ -67,6 +76,12 @@ class HassStoreTunnelConfigFlow(ConfigFlow, domain=DOMAIN):
         self._prefer_local: bool = False
         self._binary_sha256: str = ""
         self._binary_mirror: str = DEFAULT_BINARY_MIRROR
+        # 发布清单缓存：async_step_binary 进入时拉一次，给 sha256/mirror 做默认值。
+        # key 是镜像里的 "amd64"/"aarch64"；没拉到就 {}（用户仍可手填，不阻塞 flow）。
+        self._release_manifest: dict[str, Any] = {}
+        # 校验失败重渲时回填用户上一次输入（不然手敲的 sha 被重置成预填值，白敲）。
+        self._last_sha_input: str = ""
+        self._last_mirror_input: str = ""
 
     # -- helpers ------------------------------------------------------------
     def _build_schema(self, *, defaults: dict[str, Any] | None = None) -> vol.Schema:
@@ -188,35 +203,60 @@ class HassStoreTunnelConfigFlow(ConfigFlow, domain=DOMAIN):
         曾经的 bug：这个必填项只藏在 OptionsFlow 的"高级选项"里（还依赖已废弃的
         ``show_advanced_options``），Container 用户装完直接 SETUP_RETRY 循环，
         UI 里却找不到填的地方 → 100% 卡死。这里在内置模式下**必填**。
+
+        现在的流程：进入本步**自动**拉 ``GET {server_url}/api/v1/tunnel/release/manifest``，
+        把当前架构的 ``sha256`` 和 ``mirror_base`` 预填进表单（manifest 是权威信息来源，
+        用户不再需要去官网对照抄）。拉到就自动带出；拉不到（后端没配 TUNNEL_RELEASE_DIR /
+        用户自建站没发布）就留空，**不阻塞**——仍然允许用户手动填。
         """
         errors: dict[str, str] = {}
         if user_input is not None:
             sha = str(user_input.get(CONF_BINARY_SHA256, "")).strip().lower()
+            self._last_sha_input = sha
+            self._last_mirror_input = str(user_input.get(CONF_BINARY_MIRROR, "")).strip()
             if len(sha) != 64 or any(c not in "0123456789abcdef" for c in sha):
                 errors["base"] = "invalid_sha256"
             else:
                 self._binary_sha256 = sha
                 # 镜像地址也要收下：此前这一步展示了输入框却丢弃用户输入
                 # （_async_create_entry 硬编码 DEFAULT），用户填了等于没填。
-                mirror = str(user_input.get(CONF_BINARY_MIRROR, "")).strip()
-                self._binary_mirror = mirror or DEFAULT_BINARY_MIRROR
+                self._binary_mirror = self._last_mirror_input or DEFAULT_BINARY_MIRROR
                 return self._async_create_entry()
+
+        # 首次渲染：自动拉 manifest 预填；后续重渲（校验失败回填）不重复拉。
+        if not self._release_manifest:
+            client = HassStoreClient(self.hass, self._server_url)
+            self._release_manifest = await client.async_get_release_manifest()
+        arch = _release_arch()
+        bin_info = (self._release_manifest.get("binaries") or {}).get(arch) or {}
+        sha_prefill = self._last_sha_input or bin_info.get("sha256", "")
+        mirror_default = (
+            self._last_mirror_input
+            or self._release_manifest.get("mirror_base")
+            or DEFAULT_BINARY_MIRROR
+        )
 
         return self.async_show_form(
             step_id="binary",
             data_schema=vol.Schema(
                 {
-                    vol.Required(CONF_BINARY_SHA256, default=""): selector.TextSelector(
+                    vol.Required(
+                        CONF_BINARY_SHA256, default=sha_prefill
+                    ): selector.TextSelector(
                         selector.TextSelectorConfig(type=selector.TextSelectorType.TEXT)
                     ),
                     vol.Optional(
-                        CONF_BINARY_MIRROR, default=DEFAULT_BINARY_MIRROR
+                        CONF_BINARY_MIRROR, default=mirror_default
                     ): selector.TextSelector(
                         selector.TextSelectorConfig(type=selector.TextSelectorType.URL)
                     ),
                 }
             ),
             errors=errors,
+            description_placeholders={
+                "arch": arch,
+                "manifest_url": f"{self._server_url}/api/v1/tunnel/release/manifest",
+            },
         )
 
     async def _async_finish_bind(self) -> ConfigFlowResult:
@@ -341,6 +381,19 @@ class HassStoreTunnelOptionsFlow(OptionsFlow):
 
         current = self.config_entry.options
         data = self.config_entry.data
+
+        # 二进制字段的默认优先级：已保存值 > 发布清单自动获取 > 硬编码默认。
+        # 与 async_step_binary 同一份 manifest（{site}/api/v1/tunnel/release/manifest），
+        # 用户改站点地址后重开选项也会跟到对应站点。
+        server_url = current.get(CONF_SERVER_URL) or data.get(CONF_SERVER_URL) or DEFAULT_SERVER_URL
+        manifest = await HassStoreClient(
+            self.hass, server_url
+        ).async_get_release_manifest()
+        arch = _release_arch()
+        manifest_bin = (manifest.get("binaries") or {}).get(arch) or {}
+        sha_suggest = manifest_bin.get("sha256", "")
+        mirror_suggest = manifest.get("mirror_base") or ""
+
         fields: dict[Any, Any] = {
             vol.Required(
                 CONF_LOCAL_TARGET,
@@ -374,14 +427,17 @@ class HassStoreTunnelOptionsFlow(OptionsFlow):
             # 结果是 Container 用户看不到必填项 → SETUP_RETRY 循环且无从下手。
             vol.Optional(
                 CONF_BINARY_MIRROR,
-                default=current.get(CONF_BINARY_MIRROR, DEFAULT_BINARY_MIRROR),
+                default=current.get(CONF_BINARY_MIRROR)
+                or mirror_suggest
+                or DEFAULT_BINARY_MIRROR,
             ): selector.TextSelector(
                 selector.TextSelectorConfig(type=selector.TextSelectorType.URL)
             ),
             vol.Optional(
                 CONF_BINARY_SHA256,
                 default=current.get(CONF_BINARY_SHA256)
-                or data.get(CONF_BINARY_SHA256, ""),
+                or data.get(CONF_BINARY_SHA256)
+                or sha_suggest,
             ): selector.TextSelector(
                 selector.TextSelectorConfig(type=selector.TextSelectorType.TEXT)
             ),

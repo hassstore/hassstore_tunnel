@@ -143,7 +143,8 @@ async def async_prepare_binary(
     if not expected_sha256 or not expected_sha256.strip():
         raise BinaryIntegrityError(
             "binary_sha256 未配置：出于安全考虑拒绝下载/运行 hs-frpc。"
-            "请到 HassStore 官方发布页复制对应架构的 SHA256 填入集成配置。"
+            "请到站点「用户中心 → 内网穿透 → 安装向导」查看官方 SHA256，"
+            "或浏览器打开 <你的站点>/api/v1/tunnel/release/manifest 自行对照。"
         )
 
     binary = directory / BINARY_NAME

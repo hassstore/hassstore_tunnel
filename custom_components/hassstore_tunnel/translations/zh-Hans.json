@@ -3,15 +3,15 @@
     "step": {
       "user": {
         "title": "HassStore Tunnel",
-        "description": "把本机 Home Assistant 通过 HassStore 发布到公网。请先到站点「用户中心 → 内网穿透 → 绑定到 HA」生成 8 位绑定码（10 分钟内有效，仅可使用一次）。\n\n勾选同意前请阅读《HassStore 内网穿透服务用户协议》。主线路位于境外，隧道配置、用量与访问日志可能被传输并存储于中华人民共和国境外（协议第十条 · 附录 B 单独同意）。",
+        "description": "把本机 Home Assistant 通过 HassStore 发布到公网。请先到站点「用户中心 → 内网穿透 → 安装向导」生成一个 **8 位接入码**（绑定码）。它是**一次性接入凭证，不是短信/邮箱验证码**：在 HA 里填一次即完成绑定，后续不再使用。\n\n勾选同意前请阅读《HassStore 内网穿透服务用户协议》。主线路位于境外，隧道配置、用量与访问日志可能被传输并存储于中华人民共和国境外（协议第十条 · 附录 B 单独同意）。",
         "data": {
           "server_url": "HassStore 站点地址",
-          "bind_code": "绑定码（8 位）",
+          "bind_code": "接入码 / 绑定码（8 位，不是验证码）",
           "accept_terms": "我已阅读并同意《用户协议》与个人信息跨境传输单独同意"
         },
         "data_description": {
           "server_url": "默认官方站点；私有化部署请填你自己的地址。",
-          "bind_code": "一次性绑定码，绑定成功后不再需要。"
+          "bind_code": "站点生成的接入凭证，填一次即完成绑定（10 分钟内有效，用完作废）。"
         }
       },
       "environment": {
@@ -23,22 +23,22 @@
       },
       "reauth_confirm": {
         "title": "重新绑定 HassStore Tunnel",
-        "description": "设备令牌已失效（可能被站点停用、轮换或设备被删除）。请到站点重新生成绑定码并填入。",
+        "description": "设备令牌已失效（可能被站点停用、轮换或设备被删除）。请到站点「内网穿透 → 安装向导」重新生成接入码并填入。",
         "data": {
           "server_url": "HassStore 站点地址",
-          "bind_code": "新的绑定码（8 位）",
+          "bind_code": "新的接入码 / 绑定码（8 位，不是验证码）",
           "accept_terms": "我继续同意《用户协议》与跨境传输单独同意"
         }
       },
       "binary": {
         "title": "校验 hs-frpc 二进制",
-        "description": "集成内置模式需要下载并校验 hs-frpc。出于安全考虑，**必须先提供 SHA256**，否则集成拒绝下载/执行任何二进制。\n\n请从 HassStore 官方发布页复制**对应架构**的 SHA256（amd64 / aarch64）填入。",
+        "description": "集成内置模式需要下载并校验 hs-frpc。出于安全考虑，**必须先提供 SHA256**，否则集成拒绝下载/执行任何二进制。\n\n已自动从站点获取**官方发布清单**并预填本机架构（{arch}）的 SHA256。如果没拉到（后端未配发布目录、自建站未发布），可手动打开 {manifest_url} 复制对应值填入。",
         "data": {
           "binary_sha256": "hs-frpc SHA256 校验值（64 位十六进制）",
           "binary_mirror": "下载镜像地址"
         },
         "data_description": {
-          "binary_mirror": "默认官方镜像；国内加速可改为自建镜像。"
+          "binary_mirror": "默认官方镜像（{manifest_url} 返回的 mirror_base）；国内加速可改为自建镜像。"
         }
       }
     },

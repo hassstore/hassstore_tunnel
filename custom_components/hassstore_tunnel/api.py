@@ -28,6 +28,7 @@ from .const import (
     API_CONFIG,
     API_EVENT,
     API_HEARTBEAT,
+    API_RELEASE_MANIFEST,
     CONF_BIND_CODE,
     CONF_DEVICE_TOKEN,
     HS_CLIENT_VERSION,
@@ -180,6 +181,19 @@ class HassStoreClient:
             await self._request("POST", API_EVENT, json_data=event)
         except HassStoreError as err:
             _LOGGER.debug("上报事件失败（忽略）：%s", err)
+
+    async def async_get_release_manifest(self) -> dict[str, Any]:
+        """GET ``{site}/api/v1/tunnel/release/manifest`` — 客户端二进制发布清单。
+
+        **公开端点，不需要令牌**。返回
+        ``{version, mirror_base, binaries: {arch: {sha256, size, url}}}``。
+        失败时返回 ``{}``（配置流把它当作"没发布"——用户仍可手动填，
+        不能因后端没配 TUNNEL_RELEASE_DIR 就把整个 flow 卡死）。
+        """
+        try:
+            return await self._request("GET", API_RELEASE_MANIFEST) or {}
+        except HassStoreError:
+            return {}
 
 
 def _unwrap(payload: Any) -> dict[str, Any] | None:
