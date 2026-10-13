@@ -1,7 +1,7 @@
 {
   "domain": "hassstore_tunnel",
   "name": "HassStore Tunnel",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "documentation": "https://github.com/hassstore/hassstore_tunnel",
   "issue_tracker": "https://github.com/hassstore/hassstore_tunnel/issues",
   "codeowners": [

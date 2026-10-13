@@ -17,7 +17,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 import aiohttp
@@ -95,7 +95,7 @@ class HassStoreTunnelCoordinator(DataUpdateCoordinator[TunnelState]):
             hass,
             _LOGGER,
             name=f"{DOMAIN} {entry.title}",
-            update_interval=UPDATE_INTERVAL_SECONDS,
+            update_interval=timedelta(seconds=UPDATE_INTERVAL_SECONDS),
             config_entry=entry,
         )
         self.client = client
