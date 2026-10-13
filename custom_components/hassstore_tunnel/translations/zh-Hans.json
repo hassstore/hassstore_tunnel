@@ -44,10 +44,10 @@
     },
     "error": {
       "cannot_connect": "无法连接 HassStore 站点，请检查地址、DNS 与网络。",
-      "invalid_auth": "鉴权失败：设备令牌或绑定码无效。",
-      "invalid_bind_code": "绑定码无效、已过期或已被使用。请回站点重新生成（10 分钟有效，一次性）。",
+      "invalid_auth": "鉴权失败：设备令牌或接入码无效。",
+      "invalid_bind_code": "接入码无效、已过期或已被使用。请回站点重新生成（10 分钟有效，一次性）。",
       "invalid_url": "站点地址必须以 http:// 或 https:// 开头。",
-      "bind_code_required": "请填写绑定码。",
+      "bind_code_required": "请填写接入码。",
       "terms_required": "必须同意用户协议与跨境传输单独同意后才能使用本服务。",
       "invalid_sha256": "SHA256 格式不正确：应为 64 位十六进制字符（可从官方发布页复制）。"
     },
@@ -73,7 +73,7 @@
         "data_description": {
           "local_target": "app 模式固定为 http://homeassistant:8123；集成内置模式为 http://127.0.0.1:8123。只有 8123 会被服务端接受。",
           "protocol": "wss 走 443 出站（首选）；tcp 走 7000。",
-          "binary_sha256": "留空则拒绝下载/运行 hs-frpc（安全默认）。请从官方发布页复制对应架构的 SHA256。",
+          "binary_sha256": "内置运行必填；留空则拒绝下载/运行 hs-frpc（安全默认）。已按本机架构自动预填（来源：站点发布清单 /api/v1/tunnel/release/manifest），通常无需修改。",
           "log_level": "trace / debug / info / warning / error。排障时建议临时调到 debug。"
         }
       }

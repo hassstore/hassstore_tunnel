@@ -44,12 +44,12 @@
     },
     "error": {
       "cannot_connect": "Cannot reach the HassStore site. Check the URL, DNS and network.",
-      "invalid_auth": "Authentication failed: the device token or bind code is invalid.",
-      "invalid_bind_code": "The bind code is invalid, expired, or already used. Generate a new one on the site (valid 10 minutes, single use).",
+      "invalid_auth": "Authentication failed: the device token or access code is invalid.",
+      "invalid_bind_code": "The access code is invalid, expired, or already used. Generate a new one on the site (valid 10 minutes, single use).",
       "invalid_url": "The site URL must start with http:// or https://.",
-      "bind_code_required": "Please enter the bind code.",
+      "bind_code_required": "Please enter the access code.",
       "terms_required": "You must accept the Terms of Service and the cross-border transfer consent before using this service.",
-      "invalid_sha256": "Invalid SHA256: expected 64 hexadecimal characters (copy it from the official release page)."
+      "invalid_sha256": "Invalid SHA256: expected 64 hexadecimal characters (the release manifest pre-fills it automatically; if the field is empty, open the site release manifest API to copy it)."
     },
     "abort": {
       "single_instance_allowed": "Only one HassStore Tunnel instance can be configured (one HA runs one tunnel client).",
@@ -74,7 +74,7 @@
           "local_target": "App mode is fixed to http://homeassistant:8123; in-integration mode uses http://127.0.0.1:8123. Only 8123 is accepted by the server.",
           "protocol": "wss uses outbound 443 (preferred); tcp uses 7000.",
           "log_level": "trace / debug / info / warning / error. Use debug temporarily when troubleshooting.",
-          "binary_sha256": "Leave empty to refuse downloading/running hs-frpc (secure default). Copy the SHA256 for your architecture from the official release page."
+          "binary_sha256": "Required in local-run mode; leave empty to refuse downloading/running hs-frpc (secure default). Auto-prefilled for your architecture (source: site release manifest /api/v1/tunnel/release/manifest), normally needs no change."
         }
       }
     }
