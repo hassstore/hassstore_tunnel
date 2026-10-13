@@ -1,0 +1,72 @@
+name: Release
+
+# 发版规则（HACS 自定义仓库约定）：
+#   * manifest.json 的 version 是**唯一版本来源**——推送 main 时若 version 对应
+#     的 tag 还不存在，自动打 v<version> tag + 建 Release + 挂 zip 资产。
+#   * 也可在 Actions 页手动 workflow_dispatch 触发（幂等：tag 已存在则跳过）。
+#   * zip 资产供"手动下载→拷进 custom_components"用（顶层就是 hassstore_tunnel/ 一层
+#     目录），HACS 走 git zipball 不依赖 zip_release。
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'custom_components/hassstore_tunnel/manifest.json'
+      - 'hacs.json'
+      - '.github/workflows/release.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Read version from manifest
+        id: ver
+        run: |
+          V=$(jq -r '.version' custom_components/hassstore_tunnel/manifest.json)
+          echo "version=${V}" >> "$GITHUB_OUTPUT"
+          echo "manifest version: ${V}"
+
+      - name: Guard version format (semver-ish)
+        run: |
+          echo "${{ steps.ver.outputs.version }}" \
+            | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$' \
+            || { echo "::error::manifest.json version 格式非法：${{ steps.ver.outputs.version }}"; exit 1; }
+
+      - name: Check whether tag already exists
+        id: tag
+        run: |
+          if git ls-remote --tags origin "refs/tags/v${{ steps.ver.outputs.version }}" | grep -q .; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::tag v${{ steps.ver.outputs.version }} 已存在，跳过发版"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build zip asset (顶层 = hassstore_tunnel/ 目录本身)
+        if: steps.tag.outputs.exists == 'false'
+        run: |
+          # HACS 不使用此资产；它是给"手动拷到 /config/custom_components/" 的。
+          # 顶层必须就是 hassstore_tunnel/，不能再套一层目录。
+          cd custom_components
+          # brand/ 是 HA 本地品牌资产（has_branding 检测），必须保留
+          zip -r ../hassstore_tunnel.zip hassstore_tunnel \
+            -x '*/__pycache__/*' '*.pyc'
+          cd .. && unzip -l hassstore_tunnel.zip | head -25
+
+      - name: Create GitHub Release
+        if: steps.tag.outputs.exists == 'false'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.ver.outputs.version }}
+          name: "HassStore Tunnel v${{ steps.ver.outputs.version }}"
+          files: hassstore_tunnel.zip
+          generate_release_notes: true
+          fail_on_unmatched_files: true
