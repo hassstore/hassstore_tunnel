@@ -19,7 +19,10 @@ from typing import Final
 # --- 集成标识 ---------------------------------------------------------------
 DOMAIN: Final = "hassstore_tunnel"
 NAME: Final = "HassStore Tunnel"
-VERSION: Final = "1.0.0"
+# ⚠️ 必须与 manifest.json 的 version 一致（显示为设备的 sw_version）。
+# 之前这里是 1.0.0 而 manifest 已到 1.0.4，设备页显示的版本号是假的。
+# ha/selftest.py 现在有断言强制两者相等，改版本时不会漏。
+VERSION: Final = "1.0.5"
 
 # --- 站点与 app 交付物 ------------------------------------------------------
 # 站点地址占位（与 ha/apps/tunnel/config.yaml 的 options.server_url 默认值一致）。

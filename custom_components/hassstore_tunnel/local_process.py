@@ -53,6 +53,7 @@ from .const import (
     RESTART_BACKOFF_MAX,
     STABLE_RUN_SECONDS,
     STOP_TIMEOUT_SECONDS,
+    ha_version,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -290,7 +291,13 @@ class TunnelProcess:
                 ENV_CLIENT_TYPE: CLIENT_TYPE_INTEGRATION,
                 # 上报 HA 版本：后台排查"某个 HA 版本上集体出问题"时靠它。
                 # app 形态由 run.sh 传 Supervisor 的 HA_VERSION，这里传 Core 的版本。
-                ENV_HA_VERSION: str(getattr(self.hass.config, "version", "") or ""),
+                # ⚠️ 不能用 `hass.config.version`：`Config` 从来就没有这个属性
+                # （已用真实 HA 2025.1.0 / 2026.10.1 核实：hasattr(Config,"version") 为 False，
+                # 也没有 __getattr__），getattr(..., "") 恒得空串 →
+                # HS_HA_VERSION 一直是空，后台按 HA 版本聚合时这类用户全归到"未知"。
+                # const.py 早已提供 ha_version()，但这里漏改了（const.ha_version 的注释
+                # 就写着"Config.version 已移除"）。
+                ENV_HA_VERSION: ha_version(),
             }
         )
         return env

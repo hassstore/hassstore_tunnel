@@ -4,8 +4,12 @@
 
     1) POST /store/repositories                    ← get_supervisor_client(hass).store.add_repository(
                                                           StoreAddRepository(repository=...))
-       已存在时 Supervisor 抛 StoreRepositoryAlreadyAddedError —— 必须幂等吞掉。
-    2) GET  /store/addons/<slug>/availability      ← async_get_addon_availability(slug)
+       幂等做法：**先 GET /store/repositories 查一遍**，已在列表里就跳过；
+       不能依赖"重复添加会抛 StoreRepositoryAlreadyAddedError"——该异常类在
+       HA 2026.10.1 锁的 aiohasupervisor 0.6.0 里并不存在（详见 async_ensure_repository）。
+    2) GET  /store/addons/<slug>/availability      ← GET /store/addons/<slug>/availability
+       真实客户端 API 是 ``store.addon_availability(slug)``（不是
+       ``async_get_addon_availability``）；0.2.2b5 无此方法，调用前用 hasattr 兜底。
        200 = 本机可安装；4xx = 架构不匹配/版本不满足 → 给用户明确 abort 原因。
     3) POST /store/addons/<slug>/install           ← AddonManager.async_install_addon()
     4) POST /addons/<slug>/options                 ← AddonManager.async_set_addon_options()
@@ -37,12 +41,18 @@ _LOGGER = logging.getLogger(__name__)
 
 # 需要写进 app options 的键（与 ha/apps/tunnel/config.yaml 的 `options:`/`schema:` 一一对应）。
 # 注意 key 名必须与 config.yaml **完全一致**，否则 Supervisor 会 400。
-# `AddonManager` 的相关方法类型别名（从 HA 源码照抄签名，便于阅读与静态检查）：
+# `AddonManager` 的相关方法**真实签名**（已用 HA 2025.1.0 / 2026.10.1 的
+# homeassistant/components/hassio/addon_manager.py 核对）：
 #   async_get_addon_info() -> AddonInfo
-#   async_install_addon(version: str | None = None) -> None
+#   async_install_addon() -> None
 #   async_set_addon_options(config: AddonOptions) -> None
 #   async_start_addon() -> None
-#   async_update_addon(version: str | None = None, *, backup: bool = False) -> None
+#   async_restart_addon() -> None
+#   async_stop_addon() -> None
+#   async_update_addon() -> None
+# （此前这里的注释写成 async_install_addon(version=None) /
+#   async_update_addon(version=None, *, backup=False)，两个版本都不存在这些参数；
+#   代码本身没传参，所以只是注释在骗人。）
 # 证据：homeassistant/components/hassio/addon_manager.py（02a §B.1.3）
 ADDON_OPTION_KEYS = (
     "bind_code",
@@ -59,11 +69,25 @@ async def async_supervisor_available(hass: HomeAssistant) -> bool:
 
     这是 02a §B.2.3 推荐的探测方式：优先看 hassio config entry（它已经做过环境变量检查），
     而不是只看 ``os.environ["SUPERVISOR"]``。两者都查，任一失败即为 False。
+
+    ⚠️ **已知边界（有意保留，不要"顺手修好"）**：
+    ``async_get_hassio_entry`` 是 **HA 2026.8.0 才加的**（已核实：2025.1.0 的
+    ``homeassistant.components.hassio`` 里没有该名字，2026.10.1 有）。
+    因此在 HAOS + HA < 2026.8.0 上这里必然 ImportError → 返回 False →
+    集成降级为 MODE_LOCAL（用集成内下载的 hs-frpc），config flow 的 "environment" 步骤不出现。
+    这是**安全降级**：直接改成 ``"hassio" in hass.config.components`` 会让那些机器
+    突然切到 addon 模式，而该路径上的可安装性预检/仓库写入在旧 aiohasupervisor 上并不完整
+    （0.2.2b5 无 ``store.addon_availability``），贸然启用会把"能用"变成 ConfigEntryNotReady。
+    要正式支持旧 HAOS 的 addon 模式，需要一台真 HAOS 做端到端验证后再改。
     """
     try:
         # 延迟 import：Container 上这个模块不会被加载（02a §B.2.2 的依赖说明）。
         from homeassistant.components.hassio import async_get_hassio_entry
     except ImportError:
+        _LOGGER.debug(
+            "本机 hassio 集成未提供 async_get_hassio_entry（HA < 2026.8.0）或不是 "
+            "HAOS/Supervised，按无 Supervisor 处理，改用集成内置运行模式"
+        )
         return False
     try:
         return async_get_hassio_entry(hass) is not None
@@ -154,6 +178,14 @@ async def async_ensure_repository(hass: HomeAssistant) -> bool:
     Core 的 ``SUPERVISOR_TOKEN`` 在 Supervisor 的鉴权中间件里走 "Home Assistant 分支"，
     匹配后直接 ``return await handler(request)``，**跳过 role_access 正则检查**
     （02a §0 事实 3 / §B.1.2），所以集成能调 ``/store/*`` 这类只对 manager/admin 开放的路由。
+
+    ⚠️ **幂等必须靠"先查列表"，不能靠"添加后按异常类型名判重"**。
+    HA 2026.10.1 锁的是 ``aiohasupervisor==0.6.0``，而
+    ``StoreRepositoryAlreadyAddedError`` **在 0.6.0 里不存在**（0.7.0 才出现；
+    0.2.2b5 也没有）。在 0.6.0 上重复添加只会拿到 ``SupervisorBadRequestError``，
+    于是 ``_is_already_added()`` 恒假 → 仓库已存在时每次都抛 ``HomeAssistantError``
+    → ``ConfigEntryNotReady`` → **addon 模式只要重启一次就再也起不来**。
+    （三个版本的异常类清单都用真实安装的 aiohasupervisor 内省核对过。）
     """
     _, _, get_supervisor_client = _import_hassio()
     try:
@@ -164,11 +196,17 @@ async def async_ensure_repository(hass: HomeAssistant) -> bool:
         ) from err
 
     client = get_supervisor_client(hass)
+
+    known_urls = await _repository_urls(client)
+    if known_urls is not None and any(_same_url(url, APP_REPOSITORY_URL) for url in known_urls):
+        _LOGGER.debug("app 仓库已存在，跳过：%s", APP_REPOSITORY_URL)
+        return False
+
     try:
         await client.store.add_repository(StoreAddRepository(repository=APP_REPOSITORY_URL))
-    except Exception as err:  # noqa: BLE001 - 需要按异常类型名做幂等判定
+    except Exception as err:  # noqa: BLE001 - 与上面的列表查询存在竞态，仍可能撞"已存在"
         if _is_already_added(err):
-            _LOGGER.debug("app 仓库已存在，跳过：%s", APP_REPOSITORY_URL)
+            _LOGGER.debug("app 仓库已存在（与查询竞态），跳过：%s", APP_REPOSITORY_URL)
             return False
         raise HomeAssistantError(
             f"添加 app 仓库失败（{APP_REPOSITORY_URL}）：{err}。"
@@ -178,14 +216,46 @@ async def async_ensure_repository(hass: HomeAssistant) -> bool:
     return True
 
 
-def _is_already_added(err: Exception) -> bool:
-    """Detect ``StoreRepositoryAlreadyAddedError`` without importing it eagerly.
+async def _repository_urls(client: Any) -> list[str] | None:
+    """Already-added repository URLs; ``None`` when the list cannot be read.
 
-    Supervisor 对重复添加返回 ``StoreRepositoryAlreadyAddedError``；
-    ``aiohasupervisor`` 会把 JSON 的 ``error_key`` 映射成同名异常类
-    （02a §A.5 / §B.1.3）。用类名匹配，避免因版本差异导致 import 失败。
+    ``repositories_list()`` 在 aiohasupervisor 0.2.2b5 / 0.6.0 / 0.7.0 都存在，
+    返回的 ``Repository`` dataclass 带 ``url`` 字段（三版一致）。仍然全部走 getattr，
+    以便模型变化时退回"直接尝试添加"而不是崩。
     """
-    return type(err).__name__ == "StoreRepositoryAlreadyAddedError"
+    try:
+        repositories = await client.store.repositories_list()
+    except Exception as err:  # noqa: BLE001 - 读不到就退回"直接尝试添加"
+        _LOGGER.debug("读取 app 仓库列表失败，改为直接尝试添加：%s", err)
+        return None
+    urls: list[str] = []
+    for repo in repositories or []:
+        url = getattr(repo, "url", None)
+        if url is None and isinstance(repo, dict):
+            url = repo.get("url")
+        if url:
+            urls.append(str(url))
+    return urls
+
+
+def _same_url(left: str, right: str) -> bool:
+    """Compare repository URLs, ignoring trailing slashes and case."""
+    return left.strip().rstrip("/").lower() == right.strip().rstrip("/").lower()
+
+
+def _is_already_added(err: Exception) -> bool:
+    """Detect "repository already added", tolerating missing exception classes.
+
+    ⚠️ ``StoreRepositoryAlreadyAddedError`` **只在部分 aiohasupervisor 版本存在**：
+    0.2.2b5（HA 2025.1.0）没有、**0.6.0（HA 2026.10.1 锁的版本）没有**、0.7.0 才有。
+    所以主判据是添加前先查 ``repositories_list()``（见 ``async_ensure_repository``），
+    这里只做竞态兜底：先认异常类名，再退化为按 Supervisor 的文案匹配。
+    （原文写"aiohasupervisor 会把 error_key 映射成同名异常类"是不成立的。）
+    """
+    if type(err).__name__ == "StoreRepositoryAlreadyAddedError":
+        return True
+    text = str(err).lower()
+    return "already" in text and "repositor" in text
 
 
 async def async_assert_addon_installable(hass: HomeAssistant) -> None:
@@ -198,6 +268,12 @@ async def async_assert_addon_installable(hass: HomeAssistant) -> None:
     """
     _, _, get_supervisor_client = _import_hassio()
     client = get_supervisor_client(hass)
+    if not hasattr(client.store, "addon_availability"):
+        # HA < 2025.10.0 锁的 aiohasupervisor（0.2.2b5）没有这个 API。
+        # 那条路径上 async_supervisor_available() 本来也返回 False（见该函数），
+        # 这里再兜一层：宁可跳过预检，也不要让"能探测到却调不通"变成 ConfigEntryNotReady。
+        _LOGGER.debug("aiohasupervisor 无 store.addon_availability，跳过可安装性预检")
+        return
     try:
         await client.store.addon_availability(APP_SLUG)
     except Exception as err:  # noqa: BLE001 - 4xx 会变成 aiohasupervisor 的异常

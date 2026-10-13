@@ -113,9 +113,20 @@ class HassStoreTunnelExpireSensor(HassStoreTunnelEntity, SensorEntity):
 
 
 class HassStoreTunnelUrlSensor(HassStoreTunnelEntity, SensorEntity):
-    """The public URL of this tunnel (``https://<prefix>.<line root domain>``)."""
+    """The public URL of this tunnel (``https://<prefix>.<line root domain>``).
 
-    _attr_device_class = SensorDeviceClass.URL
+    ⚠️ **不要给它设 ``device_class``**。Home Assistant 的 ``SensorDeviceClass``
+    **没有 URL 成员**（已核对 2026.10.1 源码 ``homeassistant/components/sensor/const.py``）。
+    之前这里写的是 ``_attr_device_class = SensorDeviceClass.URL``：类体在 **import 期**
+    执行，所以它不是一个"设备类不生效"的软问题，而是直接
+    ``AttributeError: type object 'SensorDeviceClass' has no attribute 'URL'``
+    → ``sensor`` 平台导入失败 → ``ImportError`` → **整个 config entry setup 失败**
+    （线上日志 2026-10-13 13:42，v1.0.4）。
+
+    URL 就是普通字符串状态；需要单独取用的组件已经在
+    ``extra_state_attributes`` 里以 ``fqdn`` / ``device_name`` 暴露。
+    """
+
     _attr_translation_key = SENSOR_URL
 
     def __init__(self, coordinator: HassStoreTunnelCoordinator) -> None:
