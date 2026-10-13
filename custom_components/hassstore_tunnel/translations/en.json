@@ -1,0 +1,120 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "HassStore Tunnel",
+        "description": "Publish this Home Assistant to the internet through HassStore. Generate an 8-digit bind code on the site first (User Center → Intranet Tunnel → Bind to HA); it is valid for 10 minutes and can be used once.\n\nPlease read the HassStore Tunnel Terms of Service before accepting. The main line is located outside mainland China; tunnel configuration, usage and access logs may be transferred to and stored outside the PRC (Article 10 / Appendix B — separate consent).",
+        "data": {
+          "server_url": "HassStore site URL",
+          "bind_code": "Bind code (8 digits)",
+          "accept_terms": "I have read and accept the Terms of Service and the separate cross-border transfer consent"
+        },
+        "data_description": {
+          "server_url": "Official site by default; use your own address for self-hosted deployments.",
+          "bind_code": "One-time code; not needed after binding."
+        }
+      },
+      "environment": {
+        "title": "Where should the data plane run?",
+        "description": "This machine runs HAOS (Supervisor detected). Installing the tunnel client as an app is recommended: separate container, Supervisor watchdog self-healing, and the tunnel survives HA restarts. Tick the option below to run it inside Home Assistant Core instead (simpler, but the tunnel drops when HA restarts).\n\nNote: the bind code is valid for 10 minutes and single-use — use Back to change the site URL or the code.",
+        "data": {
+          "local_client": "Run hs-frpc inside the integration (do not install the app)"
+        }
+      },
+      "binary": {
+        "title": "Verify the hs-frpc binary",
+        "description": "The in-integration mode downloads and verifies hs-frpc. For security reasons the SHA256 must be provided first — otherwise the integration refuses to download or execute any binary.\n\nCopy the SHA256 for your architecture (amd64 / aarch64) from the official HassStore release page.",
+        "data": {
+          "binary_sha256": "hs-frpc SHA256 (64 hex chars)",
+          "binary_mirror": "Download mirror URL"
+        },
+        "data_description": {
+          "binary_mirror": "Official mirror by default; use your own mirror for faster access."
+        }
+      },
+      "reauth_confirm": {
+        "title": "Re-bind HassStore Tunnel",
+        "description": "The device token is no longer valid (disabled, rotated, or the device was deleted on the site). Generate a new bind code and enter it below.",
+        "data": {
+          "server_url": "HassStore site URL",
+          "bind_code": "New bind code (8 digits)",
+          "accept_terms": "I continue to accept the Terms of Service and the cross-border transfer consent"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Cannot reach the HassStore site. Check the URL, DNS and network.",
+      "invalid_auth": "Authentication failed: the device token or bind code is invalid.",
+      "invalid_bind_code": "The bind code is invalid, expired, or already used. Generate a new one on the site (valid 10 minutes, single use).",
+      "invalid_url": "The site URL must start with http:// or https://.",
+      "bind_code_required": "Please enter the bind code.",
+      "terms_required": "You must accept the Terms of Service and the cross-border transfer consent before using this service.",
+      "invalid_sha256": "Invalid SHA256: expected 64 hexadecimal characters (copy it from the official release page)."
+    },
+    "abort": {
+      "single_instance_allowed": "Only one HassStore Tunnel instance can be configured (one HA runs one tunnel client).",
+      "reauth_successful": "Re-binding succeeded."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "HassStore Tunnel options",
+        "description": "Local target, transport protocol and log level. Changes reload the integration (and persist across restarts).",
+        "data": {
+          "local_target": "Local target",
+          "protocol": "Transport protocol",
+          "log_level": "Log level",
+          "auto_update_app": "Allow Supervisor to auto-update the app",
+          "local_client": "Run inside the integration (do not install the app)",
+          "binary_mirror": "hs-frpc download mirror URL",
+          "binary_sha256": "hs-frpc SHA256 (required for in-integration mode)"
+        },
+        "data_description": {
+          "local_target": "App mode is fixed to http://homeassistant:8123; in-integration mode uses http://127.0.0.1:8123. Only 8123 is accepted by the server.",
+          "protocol": "wss uses outbound 443 (preferred); tcp uses 7000.",
+          "log_level": "trace / debug / info / warning / error. Use debug temporarily when troubleshooting.",
+          "binary_sha256": "Leave empty to refuse downloading/running hs-frpc (secure default). Copy the SHA256 for your architecture from the official release page."
+        }
+      }
+    }
+  },
+  "entity": {
+    "binary_sensor": {
+      "tunnel_online": {
+        "name": "Tunnel online",
+        "state": {
+          "on": "Online",
+          "off": "Offline"
+        }
+      }
+    },
+    "sensor": {
+      "tunnel_traffic_today": {
+        "name": "Traffic used"
+      },
+      "tunnel_expire_at": {
+        "name": "Expires at"
+      },
+      "tunnel_url": {
+        "name": "Access URL"
+      },
+      "tunnel_version": {
+        "name": "Client version"
+      },
+      "tunnel_config_revision": {
+        "name": "Config revision"
+      }
+    }
+  },
+  "issues": {
+    "binary_integrity": {
+      "title": "hs-frpc failed integrity verification — tunnel stopped",
+      "description": "The in-integration mode verifies the hs-frpc SHA256 before running it, and that check failed:\n\n{error}\n\nEnter the correct `binary_sha256` in the integration options (copy the value for your architecture from the official release page), or switch to app mode. For security reasons the integration will **not** download or execute any binary without a checksum."
+    },
+    "trusted_proxies": {
+      "title": "trusted_proxies must be configured, otherwise login loops forever",
+      "description": "The tunnel forwards visitor traffic to Home Assistant through the edge Nginx, so HA must treat those proxies as trusted. Otherwise every request appears to come from a proxy address and session validation fails — the symptom is «log in and get bounced back to the login page».\n\nAdd the following under `http:` in `/config/configuration.yaml`:\n\n```yaml\nhttp:\n  use_x_forwarded_for: true\n  trusted_proxies:\n    - 172.30.32.0/23\n    - 127.0.0.1\n    - ::1\n```\n\nThen restart Home Assistant. See the app's Documentation page for the proxy addresses of each line/edge."
+    }
+  }
+}
