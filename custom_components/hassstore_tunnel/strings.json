@@ -1,0 +1,120 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "HassStore Tunnel",
+        "description": "把本机 Home Assistant 通过 HassStore 发布到公网。请先到站点「用户中心 → 内网穿透 → 绑定到 HA」生成 8 位绑定码（10 分钟内有效，仅可使用一次）。\n\n勾选同意前请阅读《HassStore 内网穿透服务用户协议》。主线路位于境外，隧道配置、用量与访问日志可能被传输并存储于中华人民共和国境外（协议第十条 · 附录 B 单独同意）。",
+        "data": {
+          "server_url": "HassStore 站点地址",
+          "bind_code": "绑定码（8 位）",
+          "accept_terms": "我已阅读并同意《用户协议》与个人信息跨境传输单独同意"
+        },
+        "data_description": {
+          "server_url": "默认官方站点；私有化部署请填你自己的地址。",
+          "bind_code": "一次性绑定码，绑定成功后不再需要。"
+        }
+      },
+      "environment": {
+        "title": "数据面运行位置",
+        "description": "检测到本机运行 HAOS（有 Supervisor）。推荐把隧道客户端装成 app：独立容器、Supervisor 看门狗自愈、HA 重启不断线。若你希望它随 Home Assistant Core 一起运行（配置更简单，但 HA 重启隧道会断），请勾选下面的选项。\n\n提示：绑定码 10 分钟内有效且一次性——想改站点地址或换码，可点左上角返回上一步。",
+        "data": {
+          "local_client": "在集成内直接运行 hs-frpc 子进程（不安装 app）"
+        }
+      },
+      "reauth_confirm": {
+        "title": "重新绑定 HassStore Tunnel",
+        "description": "设备令牌已失效（可能被站点停用、轮换或设备被删除）。请到站点重新生成绑定码并填入。",
+        "data": {
+          "server_url": "HassStore 站点地址",
+          "bind_code": "新的绑定码（8 位）",
+          "accept_terms": "我继续同意《用户协议》与跨境传输单独同意"
+        }
+      },
+      "binary": {
+        "title": "校验 hs-frpc 二进制",
+        "description": "集成内置模式需要下载并校验 hs-frpc。出于安全考虑，**必须先提供 SHA256**，否则集成拒绝下载/执行任何二进制。\n\n请从 HassStore 官方发布页复制**对应架构**的 SHA256（amd64 / aarch64）填入。",
+        "data": {
+          "binary_sha256": "hs-frpc SHA256 校验值（64 位十六进制）",
+          "binary_mirror": "下载镜像地址"
+        },
+        "data_description": {
+          "binary_mirror": "默认官方镜像；国内加速可改为自建镜像。"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "无法连接 HassStore 站点，请检查地址、DNS 与网络。",
+      "invalid_auth": "鉴权失败：设备令牌或绑定码无效。",
+      "invalid_bind_code": "绑定码无效、已过期或已被使用。请回站点重新生成（10 分钟有效，一次性）。",
+      "invalid_url": "站点地址必须以 http:// 或 https:// 开头。",
+      "bind_code_required": "请填写绑定码。",
+      "terms_required": "必须同意用户协议与跨境传输单独同意后才能使用本服务。",
+      "invalid_sha256": "SHA256 格式不正确：应为 64 位十六进制字符（可从官方发布页复制）。"
+    },
+    "abort": {
+      "single_instance_allowed": "只能配置一个 HassStore Tunnel 实例（一台 HA 只跑一个隧道客户端）。",
+      "reauth_successful": "重新绑定成功。"
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "HassStore Tunnel 选项",
+        "description": "回源地址、传输协议与日志级别。改动会重载集成（HA 重启后依然生效）。",
+        "data": {
+          "local_target": "回源地址",
+          "protocol": "传输协议",
+          "log_level": "日志级别",
+          "auto_update_app": "允许 Supervisor 自动更新 app",
+          "local_client": "在集成内直接运行（不安装 app）",
+          "binary_mirror": "hs-frpc 下载镜像地址",
+          "binary_sha256": "hs-frpc SHA256 校验值（内置运行必填）"
+        },
+        "data_description": {
+          "local_target": "app 模式固定为 http://homeassistant:8123；集成内置模式为 http://127.0.0.1:8123。只有 8123 会被服务端接受。",
+          "protocol": "wss 走 443 出站（首选）；tcp 走 7000。",
+          "binary_sha256": "留空则拒绝下载/运行 hs-frpc（安全默认）。请从官方发布页复制对应架构的 SHA256。",
+          "log_level": "trace / debug / info / warning / error。排障时建议临时调到 debug。"
+        }
+      }
+    }
+  },
+  "entity": {
+    "binary_sensor": {
+      "tunnel_online": {
+        "name": "隧道在线",
+        "state": {
+          "on": "在线",
+          "off": "离线"
+        }
+      }
+    },
+    "sensor": {
+      "tunnel_traffic_today": {
+        "name": "已用流量"
+      },
+      "tunnel_expire_at": {
+        "name": "到期时间"
+      },
+      "tunnel_url": {
+        "name": "访问地址"
+      },
+      "tunnel_version": {
+        "name": "客户端版本"
+      },
+      "tunnel_config_revision": {
+        "name": "配置版本"
+      }
+    }
+  },
+  "issues": {
+    "binary_integrity": {
+      "title": "hs-frpc 未通过完整性校验，隧道已停止",
+      "description": "集成内置模式要求先校验 hs-frpc 的 SHA256 才会运行，当前检查失败：\n\n{error}\n\n请到集成选项里填入正确的 `binary_sha256`（从官方发布页复制对应架构的值），或改用 app 模式。出于安全考虑，集成**不会**在缺少校验值时下载或执行任何二进制。"
+    },
+    "trusted_proxies": {
+      "title": "需要配置 trusted_proxies，否则登录会无限跳转",
+      "description": "隧道把访客流量经边缘 Nginx 转给 Home Assistant，HA 必须把这些代理视为受信，否则每个请求看到的都是代理地址、session 校验失败——现象是「登录后又被弹回登录页」。\n\n请在 `/config/configuration.yaml` 的 `http:` 下补全：\n\n```yaml\nhttp:\n  use_x_forwarded_for: true\n  trusted_proxies:\n    - 172.30.32.0/23\n    - 127.0.0.1\n    - ::1\n```\n\n然后重启 Home Assistant。各线路机/边缘的代理地址见 app 的 Documentation 页。"
+    }
+  }
+}

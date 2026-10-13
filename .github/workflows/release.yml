@@ -1,0 +1,67 @@
+name: Release
+
+# 发版规则（HACS 自定义仓库约定）：
+#   * manifest.json 的 version 是**唯一版本来源**——推送 main 时若 version 对应
+#     的 tag 还不存在，自动打 v<version> tag + 建 Release + 挂 zip 资产。
+#   * 也可在 Actions 页手动 workflow_dispatch 触发（幂等：tag 已存在则跳过）。
+#   * zip 资产名固定 hassstore_tunnel.zip，与 hacs.json 的 zip_release/filename 对齐。
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'custom_components/hassstore_tunnel/manifest.json'
+      - 'hacs.json'
+      - '.github/workflows/release.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Read version from manifest
+        id: ver
+        run: |
+          V=$(jq -r '.version' custom_components/hassstore_tunnel/manifest.json)
+          echo "version=${V}" >> "$GITHUB_OUTPUT"
+          echo "manifest version: ${V}"
+
+      - name: Guard version format (semver-ish)
+        run: |
+          echo "${{ steps.ver.outputs.version }}" \
+            | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$' \
+            || { echo "::error::manifest.json version 格式非法：${{ steps.ver.outputs.version }}"; exit 1; }
+
+      - name: Check whether tag already exists
+        id: tag
+        run: |
+          if git ls-remote --tags origin "refs/tags/v${{ steps.ver.outputs.version }}" | grep -q .; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::tag v${{ steps.ver.outputs.version }} 已存在，跳过发版"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build zip asset
+        if: steps.tag.outputs.exists == 'false'
+        run: |
+          cd custom_components
+          zip -r ../hassstore_tunnel.zip hassstore_tunnel -x '*/__pycache__/*' '*.pyc'
+          cd .. && unzip -l hassstore_tunnel.zip | head -25
+
+      - name: Create GitHub Release
+        if: steps.tag.outputs.exists == 'false'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.ver.outputs.version }}
+          name: "HassStore Tunnel v${{ steps.ver.outputs.version }}"
+          files: hassstore_tunnel.zip
+          generate_release_notes: true
+          fail_on_unmatched_files: true
