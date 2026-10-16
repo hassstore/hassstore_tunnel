@@ -39,16 +39,17 @@ from .const import (
     CONF_PROTOCOL,
     CONF_SERVER_URL,
     DEFAULT_BINARY_MIRROR,
-    DEFAULT_LOCAL_TARGET,
     DEFAULT_LOG_LEVEL,
     DEFAULT_PROTOCOL,
     DEFAULT_SERVER_URL,
     DOMAIN,
+    LOCAL_HOST,
     LOG_LEVELS,
     NAME,
     PROTOCOLS,
     ha_version,
 )
+from .ha_http import async_ha_http_port
 from .supervisor import async_supervisor_available
 
 
@@ -118,11 +119,15 @@ class HassStoreTunnelConfigFlow(ConfigFlow, domain=DOMAIN):
         有效（02 §6.3），错误要**当场**告诉用户，而不是等 entry setup 才失败。
         """
         client = HassStoreClient(self.hass, server_url)
+        # 这一步还不知道用户会选 app 还是内置运行（mode 在下一步才定），
+        # 所以只保证**端口**准确（插件的一致性检查只比端口，主机会在 setup/
+        # 心跳阶段被纠正为 homeassistant 或 127.0.0.1）。
         result = await client.async_bind(
             bind_code,
             hostname=platform.node() or "homeassistant",
             ha_version=ha_version(),
             arch=platform.machine(),
+            local_target=f"http://{LOCAL_HOST}:{await async_ha_http_port(self.hass)}",
         )
         return result.get(CONF_DEVICE_TOKEN), result
 
@@ -279,7 +284,8 @@ class HassStoreTunnelConfigFlow(ConfigFlow, domain=DOMAIN):
             options={
                 CONF_DEVICE_TOKEN: self._device_token,
                 **({CONF_DEVICE_ID: self._device_id} if self._device_id else {}),
-                CONF_LOCAL_TARGET: DEFAULT_LOCAL_TARGET,
+                # 空串 = 自动跟随 HA 实际 HTTP 端口（2026.x 起 HAOS 默认是 80）。
+                CONF_LOCAL_TARGET: "",
                 CONF_PROTOCOL: DEFAULT_PROTOCOL,
                 CONF_LOG_LEVEL: DEFAULT_LOG_LEVEL,
                 CONF_AUTO_UPDATE_APP: True,
@@ -370,6 +376,10 @@ class HassStoreTunnelOptionsFlow(OptionsFlow):
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         """Single-step options form."""
         if user_input is not None:
+            # local_target 留空 = 自动跟随 HA 端口（见 __init__._async_effective_local_target：
+            # 留空 / 端口==当前探测值 / 端口是旧版写死的 8123，都按自动处理）。
+            if CONF_LOCAL_TARGET in user_input:
+                user_input[CONF_LOCAL_TARGET] = (user_input[CONF_LOCAL_TARGET] or "").strip()
             # ⚠️ 必须保留既有 options：async_create_entry 会**整体替换** options，
             # 而表单只产出 local_target/protocol/log_level 等可选项——CONF_DEVICE_TOKEN
             # 与 CONF_DEVICE_ID 也在 options 里（config_flow 只把它们写 options、
@@ -395,9 +405,13 @@ class HassStoreTunnelOptionsFlow(OptionsFlow):
         mirror_suggest = manifest.get("mirror_base") or ""
 
         fields: dict[Any, Any] = {
+            # 预填当前探测值（留空也是自动——保存这个回显值同样会被判定为
+            # "自动"，所以不会把端口钉死；想固定到**别的**端口的用户，
+            # 填那个端口即可，它不等于探测值就会被原样保留）。
             vol.Required(
                 CONF_LOCAL_TARGET,
-                default=current.get(CONF_LOCAL_TARGET, DEFAULT_LOCAL_TARGET),
+                default=current.get(CONF_LOCAL_TARGET)
+                or f"http://127.0.0.1:{await async_ha_http_port(self.hass)}",
             ): selector.TextSelector(
                 selector.TextSelectorConfig(type=selector.TextSelectorType.URL)
             ),

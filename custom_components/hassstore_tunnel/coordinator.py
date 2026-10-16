@@ -105,7 +105,10 @@ class HassStoreTunnelCoordinator(DataUpdateCoordinator[TunnelState]):
         # 让 coordinator 不必 import 进程管理模块（避免循环依赖）。
         self._process_health_cb = process_health_cb
         # action 变化时的回调（02 §9.4 流程图里的 action=stop 分支）：
-        # 内置模式用它暂停/恢复子进程；app 模式由服务端直接拒绝连接，无需客户端动作。
+        # **同步**调用方——内置模式只翻转 TunnelProcess 的期望位
+        # （set_desired_paused），真实 pause/resume 由其内部收敛任务串行执行；
+        # 在这里直接 await pause/resume 会阻塞整个 30s 拉取循环。
+        # app 模式由服务端直接拒绝连接，无需客户端动作。
         self._action_cb = action_cb
         # addon 模式回调：hs-frpc 在 app 容器网络命名空间里，本机 127.0.0.1:7401
         # 永远访问不到（集成与容器不共享 loopback）。此时 health_addr 传 None，

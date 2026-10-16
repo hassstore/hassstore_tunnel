@@ -71,7 +71,7 @@
           "binary_sha256": "hs-frpc SHA256 校验值（内置运行必填）"
         },
         "data_description": {
-          "local_target": "app 模式固定为 http://homeassistant:8123；集成内置模式为 http://127.0.0.1:8123。只有 8123 会被服务端接受。",
+          "local_target": "app 模式固定使用 `homeassistant` 主机名、集成内置模式使用 `127.0.0.1`；**留空 = 自动跟随 Home Assistant 的实际 HTTP 端口**（推荐：HA 2026.x 起 Supervisor 下 Core 默认端口是 80 而非 8123）。自定义端口必须在站点回源白名单内（默认 8123,80）。",
           "protocol": "wss 走 443 出站（首选）；tcp 走 7000。",
           "binary_sha256": "内置运行必填；留空则拒绝下载/运行 hs-frpc（安全默认）。已按本机架构自动预填（来源：站点发布清单 /api/v1/tunnel/release/manifest），通常无需修改。",
           "log_level": "trace / debug / info / warning / error。排障时建议临时调到 debug。"
@@ -114,7 +114,7 @@
     },
     "trusted_proxies": {
       "title": "需要配置 trusted_proxies，否则登录会无限跳转",
-      "description": "隧道把访客流量经边缘 Nginx 转给 Home Assistant，HA 必须把这些代理视为受信，否则每个请求看到的都是代理地址、session 校验失败——现象是「登录后又被弹回登录页」。\n\n请在 `/config/configuration.yaml` 的 `http:` 下补全：\n\n```yaml\nhttp:\n  use_x_forwarded_for: true\n  trusted_proxies:\n    - 172.30.32.0/23\n    - 127.0.0.1\n    - ::1\n```\n\n然后重启 Home Assistant。各线路机/边缘的代理地址见 app 的 Documentation 页。"
+      "description": "隧道把访客流量经边缘 Nginx 转给 Home Assistant，HA 必须把这些代理视为受信，否则每个请求看到的都是代理地址、session 校验失败——现象是「登录后又被弹回登录页」。\n\n请在 `/config/configuration.yaml` 的 `http:` 下补全：\n\n```yaml\nhttp:\n  use_x_forwarded_for: true\n  trusted_proxies:\n    - 172.30.32.0/23\n    - 127.0.0.1\n    - ::1\n```\n\n**当前缺失的配置项**：{missing}\n\n然后重启 Home Assistant。各线路机/边缘的代理地址见 app 的 Documentation 页。"
     }
   }
 }

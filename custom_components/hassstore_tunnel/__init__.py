@@ -5,7 +5,7 @@
     有 Supervisor（HAOS）          集成 = 安装器：加仓库 → 装 app → 写 options → 启动
                                   数据面 = app 容器里的 hs-frpc（独立生命周期 + watchdog）
     无 Supervisor（Container/Core）集成 = 数据面：下载/校验 hs-frpc → 托管子进程
-    有 Supervisor 但用户想内置运行  同"无 Supervisor"，只是回源仍是 127.0.0.1:8123
+    有 Supervisor 但用户想内置运行  同"无 Supervisor"，只是回源走 127.0.0.1:<HA端口>
 
 三条铁律：
   * ``async_unload_entry`` **必须** kill 子进程（否则重载集成会留下孤儿进程继续占隧道）。
@@ -21,6 +21,7 @@ import os
 import platform
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from ipaddress import ip_network
 from pathlib import Path
 from typing import Any
 
@@ -32,7 +33,7 @@ from homeassistant.helpers import issue_registry as ir
 
 from .api import HassStoreAuthError, HassStoreClient, HassStoreCommError, HassStoreError
 from .const import (
-    APP_LOCAL_TARGET,
+    APP_LOCAL_HOST,
     BINARY_NAME,
     CONFIG_CACHE_FILE_NAME,
     CONF_ACCEPT_TERMS,  # noqa: F401 - 协议同意键名，记录在此便于检索（由 config_flow 写入）
@@ -48,11 +49,12 @@ from .const import (
     CONF_PROTOCOL,
     CONF_SERVER_URL,
     DEFAULT_BINARY_MIRROR,
+    DEFAULT_HA_PORT,
     DEFAULT_HEALTH_ADDR,
-    DEFAULT_LOCAL_TARGET,
     DEFAULT_LOG_LEVEL,
     DEFAULT_PROTOCOL,
     DOMAIN,
+    LOCAL_HOST,
     MODE_ADDON,
     MODE_LOCAL,
     NAME,
@@ -60,6 +62,7 @@ from .const import (
     ha_version,
 )
 from .coordinator import HassStoreTunnelCoordinator
+from .ha_http import async_ha_http_port, async_use_x_forwarded_for
 from .local_process import BinaryIntegrityError, TunnelProcess, async_prepare_binary
 from .supervisor import (
     async_get_addon_state,
@@ -75,6 +78,9 @@ PLATFORMS: list[Platform] = [Platform.BINARY_SENSOR, Platform.SENSOR]
 
 # 修复中心（Repairs）用的问题 ID（02a §B.2.3：用 async_create_issue 给用户可操作提示）。
 ISSUE_BINARY_INTEGRITY = "binary_integrity"
+# trusted_proxies 缺失表现为"登录后无限跳转"（forwarded.py 直接 400），
+# 属于"不配就 100% 失败"的硬门槛——持久通知之外必须有 Repairs issue。
+ISSUE_TRUSTED_PROXIES = "trusted_proxies"
 
 
 @dataclass
@@ -120,7 +126,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     )
 
     # 2) 没有令牌时先绑定（bind_code 只在全新安装/换绑时存在）
-    token = await _async_ensure_device_token(hass, entry, client, token)
+    token = await _async_ensure_device_token(hass, entry, client, token, mode=mode)
 
     # ⚠️ 先把 runtime_data 占位挂到 entry 上，再启动数据面。
     # 曾经的 bug：数据面启动失败（ConfigEntryNotReady）时 runtime_data 从未赋值，
@@ -188,6 +194,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, _async_shutdown(entry))
     )
     _async_notify_setup_result(hass, mode, process, addon_state)
+    await _async_check_trusted_proxies(hass, mode)
     _LOGGER.info(
         "%s 已就绪（mode=%s，数据面=%s）",
         NAME,
@@ -350,6 +357,98 @@ def _async_notify_setup_result(
         _LOGGER.debug("发送 setup 通知失败（忽略）：%s", err)
 
 
+# ---------------------------------------------------------------------------
+# trusted_proxies 检测（Repairs）
+# ---------------------------------------------------------------------------
+# 集成模式下 hs-frpc 从本机回环回源；app 模式下 hs-frpc 在 app 容器 netns
+# 里，回源经 bridge 网关 172.30.32.0/23。两者都是 HA 视角的"代理来源"，
+# 必须都在 http.trusted_proxies 里，否则 forwarded.py 会对每个带
+# X-Forwarded-For 的请求直接 400 —— 现象即"登录后无限跳转回登录页"。
+_LOCAL_REQUIRED_PROXIES: tuple[str, ...] = ("127.0.0.1", "::1")
+_ADDON_REQUIRED_PROXIES: tuple[str, ...] = ("172.30.32.0/23",)
+
+
+def _proxy_covers(proxies: list, needed_net) -> bool:
+    """``needed_net`` 是否被 trusted_proxies 里某一项覆盖（真子网或相等）。"""
+    for raw in proxies:
+        try:
+            net = ip_network(raw)
+        except (TypeError, ValueError):
+            continue
+        if net.version != needed_net.version:
+            continue  # subnet_of 对 v4/v6 混用直接 TypeError
+        if needed_net == net or needed_net.subnet_of(net):
+            return True
+        # HA 某些版本把 "127.0.0.1" 存成纯 IP（不是 /32）：
+        # ip_network 会归一成 /32，上面的比较已覆盖。
+    return False
+
+
+def _trusted_proxies_missing(
+    proxies: list | None,
+    mode: str,
+    *,
+    xff: bool | None,
+) -> list[str]:
+    """计算当前生效 HTTP 配置里**缺**的项（人话列表，供翻译占位 {missing}）。
+
+    返回 ``[]`` 表示齐全。``proxies`` 传 ``None`` 视为空列表（全缺）——
+    调用方已经确认 server 存在但拿不到列表时使用。
+    """
+    missing: list[str] = []
+    if xff is False:
+        missing.append("use_x_forwarded_for: true")
+    needed = _ADDON_REQUIRED_PROXIES if mode == MODE_ADDON else _LOCAL_REQUIRED_PROXIES
+    for cidr in needed:
+        # 宿主机地址按 /32（v6 /128）比较；app 段按本身 /23。
+        net = ip_network(cidr if "/" in cidr else f"{cidr}/{'128' if ':' in cidr else '32'}")
+        if not _proxy_covers(proxies or [], net):
+            missing.append(f"trusted_proxies: {cidr}")
+    return missing
+
+
+
+
+
+async def _async_check_trusted_proxies(hass: HomeAssistant, mode: str) -> None:
+    """探测生效中的 HTTP 代理配置；缺项建 Repairs issue，齐了清理 issue。
+
+    * ``hass.http`` 只在 http 组件 setup 完成后才有（recovery mode / setup 极早期
+      可能没有）→ 探测不到就跳过本次，**不删也不建** issue；
+    * ``hass.http.trusted_proxies`` 是**运行态**列表（list[IPv4Network|IPv6Network]），
+      比读 .storage 更贴近"现在生效的值"；
+    * 修复后需要重启 HA 才生效，issue 在下次 setup 时自然被清理（不存在
+      "issue 永久赖着"的问题）。
+    """
+    server = getattr(hass, "http", None)
+    if server is None:
+        _LOGGER.debug("hass.http 尚未就绪，跳过 trusted_proxies 探测")
+        return
+    proxies = getattr(server, "trusted_proxies", None)
+    if not isinstance(proxies, list):
+        _LOGGER.debug("无法读取 hass.http.trusted_proxies，跳过探测")
+        return
+    missing = _trusted_proxies_missing(
+        proxies,
+        mode,
+        xff=await async_use_x_forwarded_for(hass),
+    )
+    if missing:
+        ir.async_create_issue(
+            hass,
+            DOMAIN,
+            ISSUE_TRUSTED_PROXIES,
+            is_fixable=False,
+            severity=ir.IssueSeverity.ERROR,
+            translation_key=ISSUE_TRUSTED_PROXIES,
+            translation_placeholders={"missing": "、".join(missing)},
+            learn_more_url=TERMS_URL,
+        )
+        _LOGGER.warning("HTTP 代理配置不完整，远程访问会出现登录死循环：缺 %s", missing)
+    else:
+        ir.async_delete_issue(hass, DOMAIN, ISSUE_TRUSTED_PROXIES)
+
+
 async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """真正移除集成时收尾：清修复项 + 停 app + 收敛子进程。
 
@@ -357,6 +456,7 @@ async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
     在那里停 app 会让"改一次选项"变成一次容器停/启（见其注释）。
     """
     ir.async_delete_issue(hass, DOMAIN, ISSUE_BINARY_INTEGRITY)
+    ir.async_delete_issue(hass, DOMAIN, ISSUE_TRUSTED_PROXIES)
     runtime: HassStoreTunnelRuntimeData | None = getattr(entry, "runtime_data", None)
     # 子进程（local 模式）：unload 正常时会话已收敛，这里再兜一次幂等。
     if runtime is not None and runtime.process is not None:
@@ -390,6 +490,8 @@ async def _async_ensure_device_token(
     entry: ConfigEntry,
     client: HassStoreClient,
     token: str | None,
+    *,
+    mode: str,
 ) -> str | None:
     """Bind if we have a ``bind_code``; persist the resulting token in options.
 
@@ -407,12 +509,17 @@ async def _async_ensure_device_token(
             _LOGGER.warning("既没有设备令牌也没有绑定码；隧道无法建立，请在集成里重新配置")
         return token
 
+    # 绑定即登记真实回源端口：HA 2026.x 起 Supervisor 下 Core 默认是 80 而非
+    # 8123，若等心跳自愈，节点插件会在首个心跳周期（默认 60s）先拒一次接入。
+    bind_host = APP_LOCAL_HOST if mode == MODE_ADDON else LOCAL_HOST
+    bind_port = await async_ha_http_port(hass)
     try:
         result = await client.async_bind(
             bind_code,
             hostname=platform.node() or "homeassistant",
             ha_version=ha_version(),
             arch=platform.machine(),
+            local_target=f"http://{bind_host}:{bind_port}",
         )
     except HassStoreAuthError as err:  # pragma: no cover - bind 用 bind_code 不用 token
         raise ConfigEntryAuthFailed(str(err)) from err
@@ -456,7 +563,9 @@ async def _async_start_addon_side(
         device_token=token,
         server_url=entry.data[CONF_SERVER_URL],
         # app 是 bridge 网络 → 用容器 DNS 名回源（02a §A.2）。
-        local_target=APP_LOCAL_TARGET,
+        # 端口必须探测：HA 2026.x 起 Supervisor 下 Core 默认是 80 不是 8123
+        # （SUPERVISOR_DEFAULT_PORT），写死 8123 会让新版 HAOS 连错端口。
+        local_target=f"http://{APP_LOCAL_HOST}:{await async_ha_http_port(hass)}",
         protocol=entry.options.get(CONF_PROTOCOL, DEFAULT_PROTOCOL),
         log_level=entry.options.get(CONF_LOG_LEVEL, DEFAULT_LOG_LEVEL),
     )
@@ -474,6 +583,59 @@ async def _async_start_addon_side(
 # ---------------------------------------------------------------------------
 # 数据面 B：Container/Core（集成 = 数据面）
 # ---------------------------------------------------------------------------
+# 站点只接受"回环 / homeassistant"这两类主机的回源（见后端
+# normalizeLocalTargetRules），所以本地目标必然是下面这个规范形态之一。
+_CANONICAL_TARGET_HOSTS: frozenset[str] = frozenset(
+    {LOCAL_HOST, "localhost", APP_LOCAL_HOST, "home-assistant"}
+)
+# 旧版本集成**写死**过这个端口的默认值并存进 options；把它当作"自动"，
+# 存量用户才能在 HA 端口迁移（8123→80）后自愈，而不是连向已不监听的端口。
+_LEGACY_TARGET_PORTS: frozenset[int] = frozenset({DEFAULT_HA_PORT})
+
+
+def _target_port(value: str) -> int | None:
+    """解析 ``http://<回环|localhost|homeassistant>:<端口>`` 的端口。
+
+    非规范形态（其它主机、非 http、缺端口、非法端口）返回 ``None`` ——
+    调用方据此把它当"用户显式指定的非常规目标"原样保留。
+    """
+    v = value.strip().rstrip("/").lower()
+    if not v.startswith("http://"):
+        return None
+    host, sep, port = v.removeprefix("http://").rpartition(":")
+    if not sep or host not in _CANONICAL_TARGET_HOSTS or not port.isdigit():
+        return None
+    parsed = int(port)
+    return parsed if 0 < parsed < 65536 else None
+
+
+async def _async_effective_local_target(hass: HomeAssistant, entry: ConfigEntry) -> str:
+    """Return the local (in-integration) mode origin URL.
+
+    "自动"判定（→ ``http://127.0.0.1:<探测到的端口>``）：
+      * 留空；或
+      * 规范形态且端口**等于当前探测到的端口**（选项页预填值保存后的回显）；或
+      * 规范形态且端口是旧版写死的默认端口（存量 entry 的 8123）。
+
+    * 规范形态但端口**不同**（用户想固定到别的端口）→ 保留其端口意图，但
+      主机名仍归一为回环：local 模式与 Core 同 netns，`homeassistant` 这个
+      主机名在非 Supervisor 环境根本解析不了（只有 hassio_dns 认识它）。
+
+    非规范形态（其它主机 / 非 http）原样返回——那本来就是"用户显式选择"，
+    交给站点侧的 host 白名单去拒。
+    """
+    stored = (entry.options.get(CONF_LOCAL_TARGET) or "").strip()
+    port = await async_ha_http_port(hass)
+    if not stored:
+        return f"http://{LOCAL_HOST}:{port}"
+    parsed = _target_port(stored)
+    if parsed is None:
+        return stored
+    if parsed == port or parsed in _LEGACY_TARGET_PORTS:
+        parsed = port
+    return f"http://{LOCAL_HOST}:{parsed}"
+
+
 async def _async_start_local_side(
     hass: HomeAssistant,
     entry: ConfigEntry,
@@ -525,7 +687,7 @@ async def _async_start_local_side(
         binary=binary,
         server_url=client.server_url,
         device_token=token,
-        local_target=entry.options.get(CONF_LOCAL_TARGET, DEFAULT_LOCAL_TARGET),
+        local_target=await _async_effective_local_target(hass, entry),
         protocol=entry.options.get(CONF_PROTOCOL, DEFAULT_PROTOCOL),
         log_level=entry.options.get(CONF_LOG_LEVEL, DEFAULT_LOG_LEVEL),
         config_cache=dir_path / CONFIG_CACHE_FILE_NAME,
@@ -536,26 +698,27 @@ async def _async_start_local_side(
 
 
 def _make_action_handler(process: TunnelProcess) -> Any:
-    """Apply the server's ``action`` (``none`` / ``reload`` / ``stop``) to the child.
+    """Map the server's ``action`` (``none`` / ``reload`` / ``stop``) onto the child.
 
-    * ``stop``   → 暂停子进程（到期/超额/被停用，02 §7.6、§9.4 流程图 ``action=stop`` 分支）
-    * ``reload`` → **恢复子进程**（曾经的 bug：这里注释写"reload 不需要宿主做任何事"，
+    * ``stop``   → 期望态 = 暂停（到期/超额/被停用，02 §7.6、§9.4 流程图 ``action=stop`` 分支）
+    * ``reload`` → 期望态 = 运行（曾经的 bug：这里注释写"reload 不需要宿主做任何事"，
       但若客户端刚被 ``action=stop`` pause 过，续费后就不会自愈，用户必须手动重载集成）
-    * 其它值      → 确保子进程在跑（用户续费/兑换后自动恢复，02 §9.4 "离线容忍/热更新"）
+    * 其它值      → 期望态 = 运行（用户续费/兑换后自动恢复，02 §9.4 "离线容忍/热更新"）
 
     hs-frpc 自己按 ``config_revision`` 热更新代理（``svc.UpdateAllConfigurer``，02 附录 B），
     所以 ``reload`` 不需要我们重启进程——但必须把 pause 状态解除。
+
+    ⚠️ 本回调是**同步**入口：只翻转期望位，真正的 pause/resume 由
+    ``TunnelProcess`` 内部的收敛任务串行执行。旧实现每条动作各起一个
+    ``create_background_task(pause()/resume())``，两个协程可能交错——
+    pause 的 SIGTERM 等待窗口里 resume 先跑完，最终状态与最新指令相反
+    （续费后隧道不起来 / 停用后还在重连）。
     """
 
     def _handle(action: str | None) -> None:
         if action is None:
             return
-        if action == "stop":
-            coro = process.async_pause()
-        else:
-            # none / reload / 未知值：一律确保在跑（幂等）
-            coro = process.async_resume()
-        process.hass.async_create_background_task(coro, name=f"{DOMAIN}-action-{action}")
+        process.set_desired_paused(action == "stop")
 
     return _handle
 

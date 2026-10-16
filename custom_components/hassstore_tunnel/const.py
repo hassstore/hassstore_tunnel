@@ -22,7 +22,7 @@ NAME: Final = "HassStore Tunnel"
 # ⚠️ 必须与 manifest.json 的 version 一致（显示为设备的 sw_version）。
 # 之前这里是 1.0.0 而 manifest 已到 1.0.4，设备页显示的版本号是假的。
 # ha/selftest.py 现在有断言强制两者相等，改版本时不会漏。
-VERSION: Final = "1.0.5"
+VERSION: Final = "1.0.6"
 
 # --- 站点与 app 交付物 ------------------------------------------------------
 # 站点地址占位（与 ha/apps/tunnel/config.yaml 的 options.server_url 默认值一致）。
@@ -45,8 +45,8 @@ APP_SLUG: Final = "hassstore_tunnel"
 API_CLIENT_BASE: Final = "/api/v1/tunnel/client"
 API_BIND: Final = f"{API_CLIENT_BASE}/bind"
 API_CONFIG: Final = f"{API_CLIENT_BASE}/config"
-API_HEARTBEAT: Final = f"{API_CLIENT_BASE}/heartbeat"
-API_USAGE: Final = f"{API_CLIENT_BASE}/usage"
+# 心跳/用量上报由 hs-frpc 直接发给站点（cmd/hs-frpc → api.Heartbeat），
+# 集成不参与——所以**不**再定义 API_HEARTBEAT / API_USAGE（曾经的残留死代码）。
 API_EVENT: Final = f"{API_CLIENT_BASE}/event"
 
 # --- 公开发布清单（不需要令牌；config_flow 用来预填 binary_sha256）----------------
@@ -80,9 +80,14 @@ ENV_CLIENT_TYPE: Final = "HS_CLIENT_TYPE"
 ENV_HA_VERSION: Final = "HS_HA_VERSION"
 
 DEFAULT_HEALTH_ADDR: Final = "127.0.0.1:7401"
-DEFAULT_LOCAL_TARGET: Final = "http://127.0.0.1:8123"
-# app 形态默认 bridge 回源；集成内置形态与 Core 同 netns，用回环。
-APP_LOCAL_TARGET: Final = "http://homeassistant:8123"
+
+# 回源地址**不再是常量**：HA 2026.x 起 Supervisor 环境下 Core 的默认 HTTP
+# 端口从 8123 改为 80（SUPERVISOR_DEFAULT_PORT），且可被 SETUP_PORT 覆盖。
+# 正确的端口由 ha_http.async_ha_http_port 在运行期探测；这里只保留
+# "拼目标时用的主机名"与最后的兜底端口。
+DEFAULT_HA_PORT: Final = 8123  # 探测全失败时的兜底（homeassistant.const.SERVER_PORT）
+APP_LOCAL_HOST: Final = "homeassistant"  # app 是 bridge 网络 → Core 容器 DNS 名
+LOCAL_HOST: Final = "127.0.0.1"          # 集成内置形态与 Core 同 netns → 回环
 
 PROTOCOLS: Final = ["wss", "tcp"]
 DEFAULT_PROTOCOL: Final = "wss"
@@ -93,7 +98,7 @@ LOG_LEVELS: Final = ["trace", "debug", "info", "warning", "error"]
 DEFAULT_LOG_LEVEL: Final = "info"
 
 CLIENT_TYPE_INTEGRATION: Final = "integration"
-HS_CLIENT_VERSION: Final = "v0.71.0-hs.1"  # v{上游 frp 版本}-hs.{补丁号}
+HS_CLIENT_VERSION: Final = "v0.71.0-hs.2"  # v{上游 frp 版本}-hs.{补丁号}
 
 # --- 本地文件布局（02 附录 D：Container/Core 只有 /config 持久）------------
 CONF_DIR_NAME: Final = "hassstore_tunnel"
@@ -114,7 +119,7 @@ CONF_DEVICE_ID: Final = "device_id"
 CONF_BINARY_SHA256: Final = "binary_sha256"
 CONF_BINARY_MIRROR: Final = "binary_mirror"
 # options（可选配置）
-CONF_LOCAL_TARGET: Final = "local_target"
+CONF_LOCAL_TARGET: Final = "local_target"  # 空串 = 自动（跟随 HA 实际端口）
 CONF_PROTOCOL: Final = "protocol"
 CONF_LOG_LEVEL: Final = "log_level"
 CONF_AUTO_UPDATE_APP: Final = "auto_update_app"
@@ -126,7 +131,8 @@ CONF_ACCEPT_TERMS: Final = "accept_terms"
 # 客户端每 60s 心跳 + 拉配置；UI 状态刷新 30s 足够）。
 UPDATE_INTERVAL_SECONDS: Final = 30
 REQUEST_TIMEOUT_SECONDS: Final = 15
-# 连续多少次 401/403 才判定"令牌真的失效"（触发 reauth）。
+# 连续多少次 401 才判定"令牌真的失效"（触发 reauth；403 不算鉴权失败，
+# 见 api.py：它只可能来自 CSRF 中间件或上游 WAF/CDN）。
 # 单次抖动（站点重启、边缘 502 被误判、网络中间盒）不足以让用户重走授权流程。
 AUTH_ERROR_THRESHOLD: Final = 3
 

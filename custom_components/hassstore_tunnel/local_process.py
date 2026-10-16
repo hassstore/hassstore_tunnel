@@ -24,6 +24,7 @@ import hashlib
 import logging
 import os
 import platform
+import re
 import stat
 import subprocess
 from collections import deque
@@ -67,6 +68,10 @@ _ARCH_MAP: Final[dict[str, str]] = {
 }
 
 _STDERR_TAIL_LINES: Final = 40
+
+# hs-frpc 静态链接二进制实测 ~20MB；上限放宽到 128MB 只是防"镜像配置错误
+# 导致无限增长/把磁盘写满"的保险丝，正常构建离它很远。
+_MAX_BINARY_BYTES: Final = 128 * 1024 * 1024
 
 
 class BinaryIntegrityError(Exception):
@@ -171,21 +176,63 @@ async def async_prepare_binary(
     # 用 HA 的共享 session：走 HA 的代理/证书配置，且复用连接池。
     # （自己 new ClientSession 会绕过这两样，并在卸载时泄漏——api.py 的同款要求。）
     session = async_get_clientsession(hass)
+    tmp = binary.with_suffix(".tmp")
+    total = 0
     try:
         async with asyncio.timeout(300):
             async with session.get(url, allow_redirects=True) as response:
                 if response.status != 200:
                     raise BinaryIntegrityError(f"下载失败：HTTP {response.status}（{url}）")
-                payload = await response.read()
+                # 镜像/CDN 常见坑：404/限流/拦截时返回的是 HTML 错误页，
+                # 若照单全收就会变成"SHA256 不符"被误判成供应链攻击。
+                # 用 Content-Type 先拦截这类响应，错误信息分层
+                # （"镜像异常" vs "校验失败"是两种完全不同的处置方向）。
+                content_type = (response.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+                if content_type in ("text/html", "text/plain", "application/json"):
+                    raise BinaryIntegrityError(
+                        f"镜像返回了 {content_type}（HTTP 200 但不是二进制），"
+                        f"可能是镜像/CDN 错误页或鉴权挑战页：{url}"
+                    )
+                if (cl := response.headers.get("Content-Length")) and cl.isdigit():
+                    if int(cl) > _MAX_BINARY_BYTES:
+                        raise BinaryIntegrityError(
+                            f"镜像报告的文件大小 {int(cl)} 字节超过上限 {_MAX_BINARY_BYTES}（{url}）"
+                        )
+                # 流式落盘 + 分块交给 executor 写：
+                # * 不把整个二进制驻留内存（hs-frpc ≈20MB，低端机上
+                #   `response.read()` 会双倍驻留——bytes + 解码缓冲）；
+                # * 写盘走 executor：事件循环里不直接做阻塞 write；
+                # * 每块检查 hass.is_stopping：HA 关闭时及时中断下载，
+                #   不再把"最后一块"写完才收手（下载中点 X 关 HA 的场景）。
+                tmp_handle = await hass.async_add_executor_job(
+                    lambda: tmp.open("wb")
+                )
+                try:
+                    async for chunk in response.content.iter_chunked(256 * 1024):
+                        if hass.is_stopping:
+                            raise BinaryIntegrityError(
+                                "下载被中断：Home Assistant 正在停止"
+                            )
+                        total += len(chunk)
+                        if total > _MAX_BINARY_BYTES:
+                            raise BinaryIntegrityError(
+                                f"下载内容超过上限 {_MAX_BINARY_BYTES} 字节（{url}）"
+                            )
+                        await hass.async_add_executor_job(tmp_handle.write, chunk)
+                finally:
+                    await hass.async_add_executor_job(tmp_handle.close)
+    except BinaryIntegrityError:
+        await hass.async_add_executor_job(lambda: tmp.unlink(missing_ok=True))
+        raise
     except (TimeoutError, asyncio.TimeoutError) as err:
+        await hass.async_add_executor_job(lambda: tmp.unlink(missing_ok=True))
         raise BinaryIntegrityError(f"下载超时（{url}）") from err
     except aiohttp.ClientError as err:
+        await hass.async_add_executor_job(lambda: tmp.unlink(missing_ok=True))
         raise BinaryIntegrityError(f"下载失败（{url}）：{err}") from err
 
-    def _write_and_verify() -> None:
-        # 先写临时文件再校验、最后 rename：避免"半截文件"被当成可用二进制。
-        tmp = binary.with_suffix(".tmp")
-        tmp.write_bytes(payload)
+    def _verify_and_replace() -> None:
+        # 校验已落盘的临时文件，通过后原子 rename——避免"半截文件"被当成可用二进制。
         tmp.chmod(0o700)
         try:
             _verify_and_prepare_sync(tmp, expected_sha256)
@@ -194,8 +241,8 @@ async def async_prepare_binary(
             raise
         os.replace(tmp, binary)
 
-    await hass.async_add_executor_job(_write_and_verify)
-    _LOGGER.info("hs-frpc 下载并校验通过（%d 字节）", len(payload))
+    await hass.async_add_executor_job(_verify_and_replace)
+    _LOGGER.info("hs-frpc 下载并校验通过（%d 字节）", total)
     return binary
 
 
@@ -235,6 +282,15 @@ class TunnelProcess:
         self._paused = False
         self._log_task: asyncio.Task[None] | None = None
         self._stopping = False
+        # —— action=stop/resume 的收敛设计（曾经的竞态坑）——
+        # 服务端动作指令的"期望态"：外部（coordinator 的 action_cb）只写
+        # ``_desired_paused`` 并唤醒收敛任务，真实 pause/resume 由
+        # ``_async_apply_desired_state`` 串行执行。若每次动作各自起一个
+        # pause/resume 协程（旧实现：每条动作 create_background_task），
+        # pause 的 SIGTERM 等待窗口里 resume 先跑完 → 最终状态与最新指令
+        # **相反**（续费后隧道不起来 / 停用后还在重连）。
+        self._desired_paused = False
+        self._apply_task: asyncio.Task[None] | None = None
         self._stderr_tail: deque[str] = deque(maxlen=_STDERR_TAIL_LINES)
         self._last_error: str | None = None
         self._restarts = 0
@@ -313,6 +369,39 @@ class TunnelProcess:
             self._async_supervise(), name=f"{self._binary.name}-supervisor"
         )
 
+    @callback
+    def set_desired_paused(self, paused: bool) -> None:
+        """Record the server-intended paused state; converge asynchronously.
+
+        同步入口（coordinator 在拉取循环里直接调用）：只翻期望位、
+        保证**至多一个**收敛任务在跑。收敛任务循环检查到
+        ``_paused == _desired_paused`` 才结束，任务运行期间又被更新的
+        期望态不会丢（同一任务继续收敛，而不是再起一个并发）。
+        """
+        self._desired_paused = paused
+        if self._paused == self._desired_paused:
+            return
+        if self._apply_task is not None and not self._apply_task.done():
+            # 已在收敛中：任务退出条件是 _paused == _desired_paused，
+            # 而期望位刚被更新 → 它会继续跑到新目标，无需再起任务。
+            return
+        self._apply_task = self.hass.async_create_background_task(
+            self._async_apply_desired_state(),
+            name=f"{self._binary.name}-apply-desired",
+        )
+
+    async def _async_apply_desired_state(self) -> None:
+        """Serially converge ``_paused`` toward ``_desired_paused``.
+
+        while 循环是"串行 + 去重"的核心：一次 pause 期间目标又从
+        stop→none 反复时，只按**最新**期望值收尾，而不是顺序回放每个动作。
+        """
+        while self._paused != self._desired_paused and not self._stopping:
+            if self._desired_paused:
+                await self.async_pause()
+            else:
+                await self.async_resume()
+
     async def async_pause(self) -> None:
         """Stop the child and hold off restarts (``action=stop``).
 
@@ -342,6 +431,15 @@ class TunnelProcess:
     async def async_stop(self) -> None:
         """Stop supervising and kill the child. **必须在 async_unload_entry 里调用。**"""
         self._stopping = True
+        apply_task, self._apply_task = self._apply_task, None
+        if apply_task is not None and not apply_task.done():
+            apply_task.cancel()
+            try:
+                await apply_task
+            except asyncio.CancelledError:
+                pass
+            except Exception:  # noqa: BLE001 - 收敛失败不阻断卸载
+                _LOGGER.debug("收敛期望态任务异常（忽略）", exc_info=True)
         if self._supervisor_task is not None:
             self._supervisor_task.cancel()
             try:
@@ -522,8 +620,30 @@ def _next_backoff(current: float) -> float:
     return min(current * 2, RESTART_BACKOFF_MAX)
 
 
+# frp 日志行格式：`2026-10-15 16:13:03.326 [E] [client/control.go:153] ...`
+# 级别标记是方括号内的单字母。曾经的实现**只按英文单词子串**猜：
+# `connect to server error: EOF`（W 级）会被报成 ERROR —— 4627 次重复的
+# "StartWorkConn ... pool is full"（E 级）与单发 EOF 难分轻重。
+_FRP_LEVEL_TAG = re.compile(r"\[(?P<tag>[EWIDT])\]")
+
+_FRP_TAG_LEVEL = {
+    "E": logging.ERROR,
+    "W": logging.WARNING,
+    "I": logging.INFO,
+    "D": logging.DEBUG,
+    "T": logging.DEBUG,  # frp trace → 最近的标准级别
+}
+
+
 def _guess_level(text: str) -> int:
-    """Map a child log line onto a Python logging level (best effort)."""
+    """Map a child log line onto a Python logging level.
+
+    先认 frp 的 ``[E]/[W]/[I]/[D]/[T]`` 标记（权威），再退化到英文子串
+    （兼容老版本/非 frp 输出）。子串兜底必须排在标记之后，否则
+    `[W] ... error: EOF` 会越过真实级别被报成 ERROR。
+    """
+    if m := _FRP_LEVEL_TAG.search(text):
+        return _FRP_TAG_LEVEL.get(m.group("tag"), logging.INFO)
     lowered = text.lower()
     if "fatal" in lowered or "panic" in lowered:
         return logging.CRITICAL

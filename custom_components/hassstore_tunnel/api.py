@@ -5,8 +5,11 @@
 ============================  ==================================================
 ``POST /api/v1/tunnel/client/bind``      绑定码 → 长期设备令牌（一次性，10 分钟有效）
 ``GET  /api/v1/tunnel/client/config``    结构化客户端配置 + ``config_revision``
-``POST /api/v1/tunnel/client/heartbeat`` 心跳，响应带 ``action: none|reload|stop``
 ============================================================================================
+
+心跳与用量上报由 ``hs-frpc`` **自己**直接发给站点（它要据此驱动
+``action=stop/reload``），集成不重复发——所以没有 ``async_heartbeat`` /
+``async_report_usage`` 方法（曾经的残留死代码）。
 
 鉴权统一为 ``Authorization: Bearer <device_token>``（``bind`` 除外，它用 ``bind_code``）。
 所有请求都用 HA 共享的 ``aiohttp`` session（不要自己 new ClientSession —— 那会绕过 HA
@@ -27,7 +30,6 @@ from .const import (
     API_BIND,
     API_CONFIG,
     API_EVENT,
-    API_HEARTBEAT,
     API_RELEASE_MANIFEST,
     CONF_BIND_CODE,
     CONF_DEVICE_TOKEN,
@@ -43,9 +45,12 @@ class HassStoreError(Exception):
 
 
 class HassStoreAuthError(HassStoreError):
-    """401/403 —— 设备令牌失效、设备被停用，或权益状态异常。
+    """401 —— 设备令牌缺失/无效（``internal/service/tunnel_device.go``
+    ``AuthenticateDevice`` 对令牌问题只返回 401）。
 
     调用方应触发 ``async_step_reauth``（02a §B.4.1）。
+    **403 不在这里**：客户端 API 走 Bearer、不带 Cookie，后端的 403 只可能来自
+    CSRF 中间件或上游 WAF/CDN 拦截——把它当"令牌失效"会让用户无谓地重走授权流程。
     """
 
 
@@ -108,10 +113,19 @@ class HassStoreClient:
                     json=json_data,
                     headers=self._headers(),
                 )
-                if response.status in (401, 403):
+                if response.status == 401:
                     raise HassStoreAuthError(
-                        f"{method} {path} → HTTP {response.status}"
+                        f"{method} {path} → HTTP 401"
                         f"（设备令牌失效或被停用）{await _error_detail(response)}"
+                    )
+                if response.status == 403:
+                    # 服务端 AuthenticateDevice 只发 401；403 的来源是
+                    # CSRFGuard（有会话 Cookie 时缺 X-Requested-With）或上游
+                    # WAF/CDN/边缘代理拦截——无论哪种都不该按"令牌失效"处理，
+                    # 否则会把网络/边缘问题引入 reauth 死循环。
+                    raise HassStoreCommError(
+                        f"{method} {path} → HTTP 403"
+                        f"（被站点网关/防护层拒绝，非令牌问题）{await _error_detail(response)}"
                     )
                 if response.status >= 400:
                     raise HassStoreError(
@@ -135,12 +149,17 @@ class HassStoreClient:
         hostname: str,
         ha_version: str,
         arch: str,
+        local_target: str | None = None,
     ) -> dict[str, Any]:
         """Exchange a one-time bind code for a long-lived device token (02 §6.3).
 
         请求体字段（与 app 的 ``run.sh`` 完全一致，方便后台按 client_type 区分灰度）：
         ``bind_code`` / ``hostname`` / ``client_type`` / ``client_version`` /
-        ``ha_version`` / ``arch``。
+        ``ha_version`` / ``arch`` / ``local_target``。
+
+        ``local_target`` 是**可选**的客户端实际回源地址：带上它能让站点在绑定
+        时就登记正确端口（HA 2026.x 起 Supervisor 下 Core 默认 80，与站点默认
+        8123 不一致会让节点插件首次拒绝接入）。旧站点忽略该字段，不影响绑定。
         """
         payload = {
             CONF_BIND_CODE: bind_code,
@@ -150,6 +169,8 @@ class HassStoreClient:
             "ha_version": ha_version,
             "arch": arch,
         }
+        if local_target:
+            payload["local_target"] = local_target
         try:
             data = await self._request("POST", API_BIND, json_data=payload)
         except HassStoreError as err:
@@ -166,11 +187,6 @@ class HassStoreClient:
         if not data:
             raise HassStoreCommError("config 响应为空")
         return data
-
-    async def async_heartbeat(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """Send a heartbeat; returns ``{ok, config_revision, action}``."""
-        data = await self._request("POST", API_HEARTBEAT, json_data=payload)
-        return data or {}
 
     async def async_report_event(self, event: dict[str, Any]) -> None:
         """Best-effort event report (``proxy_start|proxy_fail|tunnel_down``).

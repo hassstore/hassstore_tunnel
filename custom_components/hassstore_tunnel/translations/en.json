@@ -71,7 +71,7 @@
           "binary_sha256": "hs-frpc SHA256 (required for in-integration mode)"
         },
         "data_description": {
-          "local_target": "App mode is fixed to http://homeassistant:8123; in-integration mode uses http://127.0.0.1:8123. Only 8123 is accepted by the server.",
+          "local_target": "App mode always uses host `homeassistant`, in-integration mode uses `127.0.0.1`. **Leave empty to auto-follow Home Assistant's actual HTTP port** (recommended — since HA 2026.x, Core listens on port 80 under Supervisor, not 8123). A custom port must be in the site's origin whitelist (default 8123,80).",
           "protocol": "wss uses outbound 443 (preferred); tcp uses 7000.",
           "log_level": "trace / debug / info / warning / error. Use debug temporarily when troubleshooting.",
           "binary_sha256": "Required in local-run mode; leave empty to refuse downloading/running hs-frpc (secure default). Auto-prefilled for your architecture (source: site release manifest /api/v1/tunnel/release/manifest), normally needs no change."
@@ -114,7 +114,7 @@
     },
     "trusted_proxies": {
       "title": "trusted_proxies must be configured, otherwise login loops forever",
-      "description": "The tunnel forwards visitor traffic to Home Assistant through the edge Nginx, so HA must treat those proxies as trusted. Otherwise every request appears to come from a proxy address and session validation fails — the symptom is «log in and get bounced back to the login page».\n\nAdd the following under `http:` in `/config/configuration.yaml`:\n\n```yaml\nhttp:\n  use_x_forwarded_for: true\n  trusted_proxies:\n    - 172.30.32.0/23\n    - 127.0.0.1\n    - ::1\n```\n\nThen restart Home Assistant. See the app's Documentation page for the proxy addresses of each line/edge."
+      "description": "The tunnel forwards visitor traffic to Home Assistant through the edge Nginx, so HA must treat those proxies as trusted. Otherwise every request appears to come from a proxy address and session validation fails — the symptom is «log in and get bounced back to the login page».\n\nAdd the following under `http:` in `/config/configuration.yaml`:\n\n```yaml\nhttp:\n  use_x_forwarded_for: true\n  trusted_proxies:\n    - 172.30.32.0/23\n    - 127.0.0.1\n    - ::1\n```\n\n**Currently missing**: {missing}\n\nThen restart Home Assistant. See the app's Documentation page for the proxy addresses of each line/edge."
     }
   }
 }
