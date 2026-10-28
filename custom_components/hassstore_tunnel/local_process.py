@@ -49,7 +49,6 @@ from .const import (
     ENV_LOCAL_TARGET,
     ENV_LOG_LEVEL,
     ENV_PROTOCOL,
-    HS_CLIENT_VERSION,
     RESTART_BACKOFF_INITIAL,
     RESTART_BACKOFF_MAX,
     STABLE_RUN_SECONDS,
@@ -271,7 +270,7 @@ class TunnelProcess:
         self._protocol = protocol
         self._log_level = log_level
         self._config_cache = config_cache
-        self.health_addr = health_addr
+        self._health_addr = health_addr
         self._on_state_change = on_state_change
 
         self._proc: asyncio.subprocess.Process | None = None
@@ -302,6 +301,16 @@ class TunnelProcess:
         return self._proc is not None and self._proc.returncode is None
 
     @property
+    def binary_path(self) -> Path:
+        """本进程托管的 ``hs-frpc`` 路径。"""
+        return self._binary
+
+    @property
+    def health_addr(self) -> str:
+        """子进程 ``/healthz`` 的监听地址（回环）。"""
+        return self._health_addr
+
+    @property
     def pid(self) -> int | None:
         """Child PID, if running."""
         return self._proc.pid if self._proc else None
@@ -326,7 +335,9 @@ class TunnelProcess:
             "online": self.is_running and not self._paused,
             "pid": self.pid,
             "restarts": self._restarts,
-            "version": HS_CLIENT_VERSION,
+            # ⚠️ **不报版本号**。曾经放的是 Python 常量 HS_CLIENT_VERSION（集成
+            # "打算交付"的版本），于是磁盘上是旧二进制时 HA 照样显示新版本——
+            # 2026-10-28 的票据过期事故就是这么被藏住的。版本只认 /healthz。
             "paused": self._paused,
             "last_error": self._last_error,
             "stderr_tail": list(self._stderr_tail)[-5:],
@@ -434,21 +445,74 @@ class TunnelProcess:
         apply_task, self._apply_task = self._apply_task, None
         if apply_task is not None and not apply_task.done():
             apply_task.cancel()
+        # ⚠️ 先把**所有**取消信号发出去再逐个 await：若 await apply_task 期间
+        # 外层取消传进来（_swallowed_outer_cancel → raise），supervisor 的
+        # cancel 已经发出——它不会在此期间又拉起一个子进程。
+        supervisor_task = self._supervisor_task
+        self._supervisor_task = None
+        if supervisor_task is not None:
+            supervisor_task.cancel()
+        # 无条件 await（即使 cancel 后瞬间已 done）：把任务的异常/取消取走，
+        # 避免 "Task exception was never retrieved" 警告。
+        if apply_task is not None:
             try:
                 await apply_task
             except asyncio.CancelledError:
-                pass
+                if _swallowed_outer_cancel():
+                    raise
             except Exception:  # noqa: BLE001 - 收敛失败不阻断卸载
                 _LOGGER.debug("收敛期望态任务异常（忽略）", exc_info=True)
-        if self._supervisor_task is not None:
-            self._supervisor_task.cancel()
+        if supervisor_task is not None:
             try:
-                await self._supervisor_task
+                await supervisor_task
             except asyncio.CancelledError:
-                pass
-            self._supervisor_task = None
+                if _swallowed_outer_cancel():
+                    raise
         await self._async_terminate_child()
         _LOGGER.debug("hs-frpc 已停止")
+
+    async def async_restart(self) -> None:
+        """停掉子进程，再从**磁盘上当前的**二进制重新拉起。
+
+        自动更新换完二进制后必须走这里——旧进程持有的是已被 rename 掉的旧
+        inode，不重启就永远加载不到新文件（见 updater 模块 docstring 第 2 条）。
+
+        暂停态跨重启保留：``async_pause`` 清掉的 ``_resume_event`` 不被
+        ``async_stop`` 触碰，所以服务端 ``action=stop`` 期间更新二进制不会
+        把隧道偷偷拉起来。
+        """
+        await self.async_stop()
+        await self.async_start()
+
+    async def async_wait_stable(self, timeout: float) -> bool:
+        """最多等 ``timeout`` 秒让子进程真正起来。
+
+        ``async_start`` 只是起了 supervisor 任务，spawn 发生在任务里，返回时
+        并不知道成没成——回滚判定需要这个确定性。
+
+        ⚠️ 只判 ``is_running`` 会被崩溃循环骗过：supervisor 的退避重连让它
+        周期性 flap（崩 → 睡 2s → 再拉起 → 再崩……），一次 0.25s 采样正好落在
+        "刚拉起"的窗口就会把坏版本判成启动成功，回滚随之失效。因此这里要求
+        **同一个 PID 持续存活**：崩溃循环每轮都是新 PID，换 PID 即判失败。
+
+        注意边界：这里验的是"进程活着"而非"隧道连上"。能 spawn、能活着但
+        连不上站点（网络/票据问题）的版本会判为稳定——这是知情取舍：此类
+        版本本身是合法交付物，连通问题由 supervisor 重连与 coordinator 排障
+        信息承接，不属于"二进制坏了"的回滚范畴。
+        """
+        deadline = self.hass.loop.time() + timeout
+        seen_pid: int | None = None
+        while True:
+            if self.is_running:
+                if seen_pid is None:
+                    seen_pid = self.pid
+                elif self.pid != seen_pid:
+                    return False  # 换了 PID = 中间崩过一次
+            elif seen_pid is not None:
+                return False  # 起来过又没了 = 崩了
+            if self.hass.loop.time() >= deadline:
+                return seen_pid is not None  # 从未起来 → False
+            await asyncio.sleep(0.25)
 
     async def _async_supervise(self) -> None:
         """Spawn → wait → backoff → respawn，直到 ``async_stop``。"""
@@ -568,7 +632,12 @@ class TunnelProcess:
         except (TimeoutError, asyncio.TimeoutError):
             pass
         except asyncio.CancelledError:
-            pass
+            # shield 只挡"等待侧取消"，**不阻止别人取消这个日志泵自身**：
+            # pause 路径的 _async_terminate_child → _cancel_log_task 会并发
+            # cancel 同一个任务，此时 CancelledError 属"被等对象自己没了"，
+            # 按原语义忽略；只有外层取消才上抛。
+            if _swallowed_outer_cancel():
+                raise
         except Exception:  # noqa: BLE001 - 泵的异常不该影响重启流程
             _LOGGER.debug("hs-frpc 日志泵排空时异常", exc_info=True)
         await self._cancel_log_task()
@@ -583,7 +652,8 @@ class TunnelProcess:
         try:
             await task
         except asyncio.CancelledError:
-            pass
+            if _swallowed_outer_cancel():
+                raise
         except Exception:  # noqa: BLE001 - 日志泵失败不应影响 supervise 循环
             _LOGGER.exception("hs-frpc 日志泵异常退出")
 
@@ -618,6 +688,20 @@ class TunnelProcess:
 def _next_backoff(current: float) -> float:
     """Double the backoff, capped (2 → 4 → … → 300)."""
     return min(current * 2, RESTART_BACKOFF_MAX)
+
+
+def _swallowed_outer_cancel() -> bool:
+    """当前协程自己是否也收到了取消（区别于"被 await 的任务自己被 cancel"）。
+
+    ``except asyncio.CancelledError: pass`` 吞掉的可能是**外层**取消——例如
+    unload 时 ``_stop_updater`` cancel 了正在 ``async_restart()`` 里的更新
+    任务：若不区分，取消在内层被吞，协程会继续跑完 ``async_start``，在
+    unload 之后把 hs-frpc 又拉起来一个孤儿进程（本仓库反复修的那类 bug）。
+    Python 3.11+ 的 ``Task.cancelling()`` 记录了向本任务发出的取消请求数；
+    被等任务自身被 cancel 时它不增长，借此区分两种来源。
+    """
+    task = asyncio.current_task()
+    return task is not None and task.cancelling() > 0
 
 
 # frp 日志行格式：`2026-10-15 16:13:03.326 [E] [client/control.go:153] ...`

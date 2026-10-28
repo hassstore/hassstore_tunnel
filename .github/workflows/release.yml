@@ -6,13 +6,19 @@ name: Release
 #   * 也可在 Actions 页手动 workflow_dispatch 触发（幂等：tag 已存在则跳过）。
 #   * zip 资产供"手动下载→拷进 custom_components"用（顶层就是 hassstore_tunnel/ 一层
 #     目录），HACS 走 git zipball 不依赖 zip_release。
+#
+# 2026-10-21 审查 OPS-8：paths 曾经只含 manifest.json/hacs.json/workflow 自身 →
+# 改集成代码忘 bump version 时 push 不触发本 workflow，HACS 用户**静默**拿不到
+# 修复（"忘 bump"恰是最常见的人为失误）。现在：
+#   1) paths 纳入整个 custom_components/**，任何代码改动都会触发；
+#   2) 增加"代码变了但 version 没变"的硬门禁（见下方 Guard 步骤）。
 
 on:
   workflow_dispatch:
   push:
     branches: [main]
     paths:
-      - 'custom_components/hassstore_tunnel/manifest.json'
+      - 'custom_components/**'
       - 'hacs.json'
       - '.github/workflows/release.yml'
 
@@ -39,6 +45,32 @@ jobs:
           echo "${{ steps.ver.outputs.version }}" \
             | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$' \
             || { echo "::error::manifest.json version 格式非法：${{ steps.ver.outputs.version }}"; exit 1; }
+
+      # 代码改动必须伴随 version bump（2026-10-21 审查 OPS-8）。
+      # 语义：本次 push 若改动了 manifest.json 以外的集成代码，而 version 相对
+      # 上一个 tag 没有变化 → 直接失败，逼发布者显式 bump（或确认无需发版）。
+      # workflow_dispatch 手动触发时没有 before，跳过该门禁。
+      - name: Guard version bump with code changes
+        run: |
+          BEFORE="${{ github.event.before }}"
+          if [ -z "$BEFORE" ] || [ "$BEFORE" = "0000000000000000000000000000000000000000" ]; then
+            echo "手动触发或无 before，跳过 bump 门禁"; exit 0
+          fi
+          CHANGED_CODE=$(git diff --name-only "$BEFORE" HEAD -- custom_components \
+            | grep -v 'custom_components/hassstore_tunnel/manifest.json' || true)
+          if [ -z "$CHANGED_CODE" ]; then
+            echo "本次只改了 manifest/非代码文件，跳过 bump 门禁"; exit 0
+          fi
+          echo "改动的集成代码："; echo "$CHANGED_CODE"
+          # version 相对 before 是否有变化（fetch-depth:0，before 已在本地）
+          OLD_V=$(git show "$BEFORE:custom_components/hassstore_tunnel/manifest.json" 2>/dev/null | jq -r '.version // empty')
+          NEW_V="${{ steps.ver.outputs.version }}"
+          if [ -n "$OLD_V" ] && [ "$OLD_V" = "$NEW_V" ]; then
+            echo "::error::集成代码有改动但 manifest.json version 未 bump（$OLD_V → $NEW_V）"
+            echo "::error::HACS 用户只会收到新 tag；请先 bump custom_components/hassstore_tunnel/manifest.json 的 version"
+            exit 1
+          fi
+          echo "version 已 bump：$OLD_V → $NEW_V"
 
       - name: Check whether tag already exists
         id: tag

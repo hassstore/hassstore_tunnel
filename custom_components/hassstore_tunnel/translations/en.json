@@ -66,6 +66,7 @@
           "protocol": "Transport protocol",
           "log_level": "Log level",
           "auto_update_app": "Allow Supervisor to auto-update the app",
+          "auto_update_client": "Auto-update the in-integration hs-frpc client",
           "local_client": "Run inside the integration (do not install the app)",
           "binary_mirror": "hs-frpc download mirror URL",
           "binary_sha256": "hs-frpc SHA256 (required for in-integration mode)"
@@ -74,7 +75,8 @@
           "local_target": "App mode always uses host `homeassistant`, in-integration mode uses `127.0.0.1`. **Leave empty to auto-follow Home Assistant's actual HTTP port** (recommended — since HA 2026.x, Core listens on port 80 under Supervisor, not 8123). A custom port must be in the site's origin whitelist (default 8123,80).",
           "protocol": "wss uses outbound 443 (preferred); tcp uses 7000.",
           "log_level": "trace / debug / info / warning / error. Use debug temporarily when troubleshooting.",
-          "binary_sha256": "Required in local-run mode; leave empty to refuse downloading/running hs-frpc (secure default). Auto-prefilled for your architecture (source: site release manifest /api/v1/tunnel/release/manifest), normally needs no change."
+          "binary_sha256": "Required for the in-integration data plane; leaving it empty refuses to download or run hs-frpc (secure default). Pre-filled for your architecture from the site's release manifest (/api/v1/tunnel/release/manifest). Maintained automatically when auto-update is on — normally no need to change it.",
+          "auto_update_client": "When enabled, the integration compares the site's release manifest every 6 hours and, if a newer version exists, downloads it, verifies its SHA256, replaces the binary atomically and restarts the client (the tunnel drops for a few seconds). **Enabling this follows the site's published version**; to pin a specific build, turn it off and point the mirror at a host that serves that build (the official mirror only serves the latest) together with the matching `binary_sha256`. Only applies to the in-integration (local) data plane — in app mode the binary lives inside the container and is managed by `auto_update_app`."
         }
       }
     }
@@ -115,6 +117,14 @@
     "trusted_proxies": {
       "title": "trusted_proxies must be configured, otherwise login loops forever",
       "description": "The tunnel forwards visitor traffic to Home Assistant through the edge Nginx, so HA must treat those proxies as trusted. Otherwise every request appears to come from a proxy address and session validation fails — the symptom is «log in and get bounced back to the login page».\n\nAdd the following under `http:` in `/config/configuration.yaml`:\n\n```yaml\nhttp:\n  use_x_forwarded_for: true\n  trusted_proxies:\n    - 172.30.32.0/23\n    - 127.0.0.1\n    - ::1\n```\n\n**Currently missing**: {missing}\n\nThen restart Home Assistant. See the app's Documentation page for the proxy addresses of each line/edge."
+    },
+    "client_update_failed": {
+      "title": "hs-frpc auto-update failed to start; rolled back",
+      "description": "The integration auto-updated hs-frpc to {version}, but the new binary failed to start. It has been rolled back to {previous} and restarted, so the tunnel should be back.\n\nThis usually means that version is not compatible with your system (architecture / dependencies). Suggested next steps:\n\n1. Check on the site (User Center → Tunnel → Install wizard) whether {version} ships a build for your architecture ({arch});\n2. If it keeps failing, turn off \"Auto-update the in-integration hs-frpc client\" in the integration options and set a working `binary_sha256` manually;\n3. Report the last few `[hs-frpc]` lines from the Home Assistant log to support."
+    },
+    "client_update_no_rollback": {
+      "title": "hs-frpc auto-update failed to start; no rollback available",
+      "description": "The integration auto-updated hs-frpc to {version}, but the new binary failed to start, and no previous-version backup was available to roll back to — the tunnel is currently stuck on a version that cannot start.\n\nManual action needed (pick one):\n\n1. Turn off \"Auto-update the in-integration hs-frpc client\" in the integration options and set `binary_sha256` back to a working build for your architecture ({arch}) — see the site's install wizard or /api/v1/tunnel/release/manifest;\n2. Switch to app mode (HAOS users);\n3. Report the last few `[hs-frpc]` lines from the Home Assistant log to support."
     }
   }
 }

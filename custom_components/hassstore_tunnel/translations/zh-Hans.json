@@ -66,6 +66,7 @@
           "protocol": "传输协议",
           "log_level": "日志级别",
           "auto_update_app": "允许 Supervisor 自动更新 app",
+          "auto_update_client": "自动更新内置运行的 hs-frpc 客户端",
           "local_client": "在集成内直接运行（不安装 app）",
           "binary_mirror": "hs-frpc 下载镜像地址",
           "binary_sha256": "hs-frpc SHA256 校验值（内置运行必填）"
@@ -73,8 +74,9 @@
         "data_description": {
           "local_target": "app 模式固定使用 `homeassistant` 主机名、集成内置模式使用 `127.0.0.1`；**留空 = 自动跟随 Home Assistant 的实际 HTTP 端口**（推荐：HA 2026.x 起 Supervisor 下 Core 默认端口是 80 而非 8123）。自定义端口必须在站点回源白名单内（默认 8123,80）。",
           "protocol": "wss 走 443 出站（首选）；tcp 走 7000。",
-          "binary_sha256": "内置运行必填；留空则拒绝下载/运行 hs-frpc（安全默认）。已按本机架构自动预填（来源：站点发布清单 /api/v1/tunnel/release/manifest），通常无需修改。",
-          "log_level": "trace / debug / info / warning / error。排障时建议临时调到 debug。"
+          "binary_sha256": "内置运行必填；留空则拒绝下载/运行 hs-frpc（安全默认）。已按本机架构自动预填（来源：站点发布清单 /api/v1/tunnel/release/manifest）。开启「自动更新」后由集成自动维护，通常无需修改。",
+          "log_level": "trace / debug / info / warning / error。排障时建议临时调到 debug。",
+          "auto_update_client": "开启后，集成每 6 小时比对一次站点发布清单，发现新版本就自动下载、校验 SHA256、原子替换并重启客户端（隧道会瞬断数秒）。**开启即跟随站点发布版**；要固定某个构建，请关闭本选项，并用一个托管该构建的镜像地址（官方镜像只提供最新版）+ 对应的 `binary_sha256`。仅对「内置运行」模式有效（app 模式下二进制在容器里，集成碰不到，那由 `auto_update_app` 管）。"
         }
       }
     }
@@ -115,6 +117,14 @@
     "trusted_proxies": {
       "title": "需要配置 trusted_proxies，否则登录会无限跳转",
       "description": "隧道把访客流量经边缘 Nginx 转给 Home Assistant，HA 必须把这些代理视为受信，否则每个请求看到的都是代理地址、session 校验失败——现象是「登录后又被弹回登录页」。\n\n请在 `/config/configuration.yaml` 的 `http:` 下补全：\n\n```yaml\nhttp:\n  use_x_forwarded_for: true\n  trusted_proxies:\n    - 172.30.32.0/23\n    - 127.0.0.1\n    - ::1\n```\n\n**当前缺失的配置项**：{missing}\n\n然后重启 Home Assistant。各线路机/边缘的代理地址见 app 的 Documentation 页。"
+    },
+    "client_update_failed": {
+      "title": "hs-frpc 自动更新后启动失败，已回滚",
+      "description": "集成自动把 hs-frpc 更新到 {version}，但新二进制启动失败，已回滚到 {previous} 并重启，隧道应已恢复。\n\n这可能表示该版本在你的系统上不兼容（架构/依赖）。建议：\n\n1. 到站点「用户中心 → 内网穿透 → 安装向导」确认 {version} 是否有本架构（{arch}）的构建；\n2. 若持续失败，在集成选项里关闭「自动更新 hs-frpc 客户端」，并手动填入可用的 `binary_sha256`；\n3. 把 Home Assistant 日志里 `[hs-frpc]` 开头的最后几行反馈给支持渠道。"
+    },
+    "client_update_no_rollback": {
+      "title": "hs-frpc 自动更新后启动失败，且无法回滚",
+      "description": "集成自动把 hs-frpc 更新到 {version}，但新二进制启动失败；由于没有可用的旧版备份，**无法自动回滚**——隧道目前停在一个起不来的版本上。\n\n需要手工处置（任选一）：\n\n1. 在集成选项里关闭「自动更新 hs-frpc 客户端」，并把 `binary_sha256` 改回本架构（{arch}）当前可用版本的值（站点「用户中心 → 内网穿透 → 安装向导」或 /api/v1/tunnel/release/manifest 可查）；\n2. 改用 app 模式（HAOS 用户）；\n3. 把 Home Assistant 日志里 `[hs-frpc]` 开头的最后几行反馈给支持渠道。"
     }
   }
 }

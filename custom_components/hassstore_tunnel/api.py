@@ -45,7 +45,7 @@ class HassStoreError(Exception):
 
 
 class HassStoreAuthError(HassStoreError):
-    """401 —— 设备令牌缺失/无效（``internal/service/tunnel_device.go``
+    """401 —— 设备令牌缺失/无效（``internal/domain/service/tunnel_device.go``
     ``AuthenticateDevice`` 对令牌问题只返回 401）。
 
     调用方应触发 ``async_step_reauth``（02a §B.4.1）。
@@ -99,7 +99,7 @@ class HassStoreClient:
 
         ⚠️ **响应信封**：站点 API 的所有响应都被包在
         ``{"code": "...", "message": "...", "data": {...}}`` 里
-        （``internal/httpx/httpx.go`` → ``Resp`` / ``func OK`` / ``func Fail``）。
+        （``internal/platform/httpx/httpx.go`` → ``Resp`` / ``func OK`` / ``func Fail``）。
         所以这里必须**剥掉 ``data``**，否则上层永远拿不到 ``device_token``。
         注意只有 ``data`` 是 object 时才剥；``hs-frpc`` 的本地 ``/healthz``
         **不走这个方法**（它是裸对象，契约见 ha/README.md）。
@@ -215,7 +215,7 @@ class HassStoreClient:
 def _unwrap(payload: Any) -> dict[str, Any] | None:
     """Strip the site's ``{code,message,data}`` envelope.
 
-    ``internal/httpx/httpx.go``：``func OK(c, data)`` 返回
+    ``internal/platform/httpx/httpx.go``：``func OK(c, data)`` 返回
     ``{"code":"OK","message":"","data":{...}}``。所以业务字段在 ``data`` 里。
     兼容两种形态：
       * 有 ``code`` 字段 → 认为是被包过的响应，取 ``data``；

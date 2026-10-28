@@ -14,17 +14,14 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any
 
-import aiohttp
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed
-from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .api import HassStoreAuthError, HassStoreClient, HassStoreError
@@ -34,6 +31,7 @@ from .const import (
     DOMAIN,
     UPDATE_INTERVAL_SECONDS,
 )
+from .updater import async_fetch_healthz
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -192,8 +190,9 @@ class HassStoreTunnelCoordinator(DataUpdateCoordinator[TunnelState]):
             except Exception:  # noqa: BLE001 - 回调来自我们自己的进程管理器
                 _LOGGER.exception("读取本地 hs-frpc 进程状态失败")
             else:
-                if state.client_version is None and proc_health.get("version"):
-                    state.client_version = str(proc_health["version"])
+                # ⚠️ 不用 proc_health 的 version 兜底：那份快照曾经填 Python 常量，
+                # 磁盘上是旧二进制时 HA 照样显示新版本（2026-10-28 事故被藏住的原因）。
+                # 版本只认 healthz，读不到就显示 unknown。
                 if not state.health_reachable and proc_health.get("running"):
                     # 进程还在但 healthz 拉不到：隧道不可用，但算"数据面可达"，
                     # 让实体展示 available 而不是灰掉，用户才能看到排障信息。
@@ -246,30 +245,17 @@ class HassStoreTunnelCoordinator(DataUpdateCoordinator[TunnelState]):
         return state
 
     async def _async_read_health(self) -> dict[str, Any] | None:
-        """Read ``hs-frpc``'s built-in ``/healthz`` (never raises)."""
+        """Read ``hs-frpc``'s built-in ``/healthz`` (never raises).
+
+        **任何 HTTP 状态码都解析 body**：隧道没连上时 hs-frpc 返回的是 503，
+        但 body 里仍有 ``ok`` / ``connected`` / ``version`` / ``last_error``。
+        旧实现对非 200 一律返回 None，于是最需要排障的那一刻（连接断开）
+        恰好把唯一的版本真相和 last_error 一起丢掉了。
+        """
         if not self.health_addr:
-            # addon 模式：hs-frpc 在 app 容器 netns 里，本机 healthz 不存在。
+            # app 模式：hs-frpc 在 app 容器 netns 里，本机 healthz 不存在。
             return None
-        session = async_get_clientsession(self.hass)
-        try:
-            async with asyncio.timeout(5):
-                response = await session.get(
-                    f"http://{self.health_addr}/healthz",
-                    # 本机回环必须绕过任何代理设置（HA 的共享 session 可能带代理）。
-                    proxy=None,
-                    headers={"Accept": "application/json"},
-                )
-                if response.status != 200:
-                    _LOGGER.debug("healthz 返回 HTTP %s", response.status)
-                    return None
-                data = await response.json(content_type=None)
-        except (TimeoutError, asyncio.TimeoutError):
-            _LOGGER.debug("healthz 超时（%s）", self.health_addr)
-            return None
-        except (aiohttp.ClientError, ValueError) as err:
-            _LOGGER.debug("healthz 不可用（%s）：%s", self.health_addr, err)
-            return None
-        return data if isinstance(data, dict) else None
+        return await async_fetch_healthz(self.hass, self.health_addr)
 
 
 def _apply_config(state: TunnelState, config: dict[str, Any]) -> None:

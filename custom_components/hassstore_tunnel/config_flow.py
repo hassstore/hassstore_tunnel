@@ -28,6 +28,7 @@ from .api import HassStoreAuthError, HassStoreClient, HassStoreCommError, HassSt
 from .const import (
     CONF_ACCEPT_TERMS,
     CONF_AUTO_UPDATE_APP,
+    CONF_AUTO_UPDATE_CLIENT,
     CONF_BIND_CODE,
     CONF_BINARY_MIRROR,
     CONF_BINARY_SHA256,
@@ -38,6 +39,7 @@ from .const import (
     CONF_LOG_LEVEL,
     CONF_PROTOCOL,
     CONF_SERVER_URL,
+    DEFAULT_AUTO_UPDATE_CLIENT,
     DEFAULT_BINARY_MIRROR,
     DEFAULT_LOG_LEVEL,
     DEFAULT_PROTOCOL,
@@ -289,6 +291,9 @@ class HassStoreTunnelConfigFlow(ConfigFlow, domain=DOMAIN):
                 CONF_PROTOCOL: DEFAULT_PROTOCOL,
                 CONF_LOG_LEVEL: DEFAULT_LOG_LEVEL,
                 CONF_AUTO_UPDATE_APP: True,
+                # hs-frpc 二进制自动更新默认关（opt-in）：换二进制比换 app 容器
+                # 更该由用户知情同意，且只在"内置运行"模式下有意义。
+                CONF_AUTO_UPDATE_CLIENT: DEFAULT_AUTO_UPDATE_CLIENT,
                 CONF_LOCAL_CLIENT: self._prefer_local,
                 CONF_BINARY_MIRROR: getattr(self, "_binary_mirror", DEFAULT_BINARY_MIRROR),
                 CONF_BINARY_SHA256: getattr(self, "_binary_sha256", ""),
@@ -380,6 +385,15 @@ class HassStoreTunnelOptionsFlow(OptionsFlow):
             # 留空 / 端口==当前探测值 / 端口是旧版写死的 8123，都按自动处理）。
             if CONF_LOCAL_TARGET in user_input:
                 user_input[CONF_LOCAL_TARGET] = (user_input[CONF_LOCAL_TARGET] or "").strip()
+            # 开启自动更新时 sha 由 updater 独占维护：表单里那个值是渲染时刻的
+            # 快照，若照写回，用户在"updater 刚换上新 sha"之后提交选项会把新 pin
+            # 覆盖回旧值 → 磁盘新二进制 vs options 旧 sha → 下次启动校验失败 →
+            # SETUP_RETRY 死循环。此分支用当前生效值覆盖用户输入（文案已说明
+            # "开启后由集成自动维护"）；关闭时用户填什么就是什么（pin 语义）。
+            if user_input.get(CONF_AUTO_UPDATE_CLIENT, DEFAULT_AUTO_UPDATE_CLIENT):
+                effective_sha = self.config_entry.options.get(CONF_BINARY_SHA256)
+                if effective_sha:
+                    user_input[CONF_BINARY_SHA256] = effective_sha
             # ⚠️ 必须保留既有 options：async_create_entry 会**整体替换** options，
             # 而表单只产出 local_target/protocol/log_level 等可选项——CONF_DEVICE_TOKEN
             # 与 CONF_DEVICE_ID 也在 options 里（config_flow 只把它们写 options、
@@ -431,6 +445,10 @@ class HassStoreTunnelOptionsFlow(OptionsFlow):
             ),
             vol.Required(
                 CONF_AUTO_UPDATE_APP, default=current.get(CONF_AUTO_UPDATE_APP, True)
+            ): selector.BooleanSelector(),
+            vol.Required(
+                CONF_AUTO_UPDATE_CLIENT,
+                default=current.get(CONF_AUTO_UPDATE_CLIENT, DEFAULT_AUTO_UPDATE_CLIENT),
             ): selector.BooleanSelector(),
             vol.Required(
                 CONF_LOCAL_CLIENT, default=current.get(CONF_LOCAL_CLIENT, False)

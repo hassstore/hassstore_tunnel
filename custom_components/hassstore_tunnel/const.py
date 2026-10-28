@@ -22,7 +22,7 @@ NAME: Final = "HassStore Tunnel"
 # ⚠️ 必须与 manifest.json 的 version 一致（显示为设备的 sw_version）。
 # 之前这里是 1.0.0 而 manifest 已到 1.0.4，设备页显示的版本号是假的。
 # ha/selftest.py 现在有断言强制两者相等，改版本时不会漏。
-VERSION: Final = "1.0.6"
+VERSION: Final = "1.0.7"
 
 # --- 站点与 app 交付物 ------------------------------------------------------
 # 站点地址占位（与 ha/apps/tunnel/config.yaml 的 options.server_url 默认值一致）。
@@ -50,7 +50,7 @@ API_CONFIG: Final = f"{API_CLIENT_BASE}/config"
 API_EVENT: Final = f"{API_CLIENT_BASE}/event"
 
 # --- 公开发布清单（不需要令牌；config_flow 用来预填 binary_sha256）----------------
-# 后端 ``internal/handler/tunnel_release.go Manifest``：
+# 后端 ``internal/domain/handler/tunnel_release.go Manifest``：
 #   {version, mirror_base, binaries: {arch: {sha256, size, url}}}
 API_RELEASE_MANIFEST: Final = "/api/v1/tunnel/release/manifest"
 
@@ -98,7 +98,7 @@ LOG_LEVELS: Final = ["trace", "debug", "info", "warning", "error"]
 DEFAULT_LOG_LEVEL: Final = "info"
 
 CLIENT_TYPE_INTEGRATION: Final = "integration"
-HS_CLIENT_VERSION: Final = "v0.71.0-hs.2"  # v{上游 frp 版本}-hs.{补丁号}
+HS_CLIENT_VERSION: Final = "v0.71.0-hs.4"  # v{上游 frp 版本}-hs.{补丁号}
 
 # --- 本地文件布局（02 附录 D：Container/Core 只有 /config 持久）------------
 CONF_DIR_NAME: Final = "hassstore_tunnel"
@@ -123,6 +123,12 @@ CONF_LOCAL_TARGET: Final = "local_target"  # 空串 = 自动（跟随 HA 实际�
 CONF_PROTOCOL: Final = "protocol"
 CONF_LOG_LEVEL: Final = "log_level"
 CONF_AUTO_UPDATE_APP: Final = "auto_update_app"
+# 内置运行的 hs-frpc 二进制自动更新（默认关：opt-in）。
+# 与 CONF_AUTO_UPDATE_APP 是两件事——那个让 Supervisor 更新 **app 容器**，
+# 这个让集成自己替换 **/config 下的 hs-frpc 文件**（app 模式下二进制在容器里，
+# 集成碰不到，故本选项在 app 模式下无意义）。
+CONF_AUTO_UPDATE_CLIENT: Final = "auto_update_client"
+DEFAULT_AUTO_UPDATE_CLIENT: Final = False
 CONF_LOCAL_CLIENT: Final = "local_client"  # HAOS 上用户可选"不装 app，集成内直接跑"
 CONF_ACCEPT_TERMS: Final = "accept_terms"
 
@@ -135,6 +141,20 @@ REQUEST_TIMEOUT_SECONDS: Final = 15
 # 见 api.py：它只可能来自 CSRF 中间件或上游 WAF/CDN）。
 # 单次抖动（站点重启、边缘 502 被误判、网络中间盒）不足以让用户重走授权流程。
 AUTH_ERROR_THRESHOLD: Final = 3
+
+# --- hs-frpc 二进制自动更新（仅内置运行模式）-------------------------------
+# 清单端点有 60/min 的 IP 限速，而版本发布是小时/天级事件，6h 足够及时。
+UPDATE_CHECK_SECONDS: Final = 6 * 60 * 60
+# 启动后多久做首次检查：给子进程留出拉起 + 健康口就绪的时间，
+# 避免在"还不知道当前版本"时动手（见 updater._async_update_locked）。
+UPDATE_STARTUP_DELAY_SECONDS: Final = 90
+# 单次更新的总时限（下载 ~20MB + SHA256 + 冒烟测试 + 重启）。超时即放弃本次，
+# 下个周期重试——绝不无限占用集成的事件循环。
+UPDATE_TIMEOUT_SECONDS: Final = 300
+# 换上新二进制后等子进程真正起来的观察窗口；超时判为"新版本起不来"并回滚。
+UPDATE_RESTART_GRACE_SECONDS: Final = 20.0
+# 读 /healthz 的超时（本机回环，5s 足够；coordinator 与 updater 共用）。
+HEALTHZ_TIMEOUT_SECONDS: Final = 5
 
 # --- 子进程自愈 -------------------------------------------------------------
 RESTART_BACKOFF_INITIAL: Final = 2.0

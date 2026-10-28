@@ -38,6 +38,7 @@ from .const import (
     CONFIG_CACHE_FILE_NAME,
     CONF_ACCEPT_TERMS,  # noqa: F401 - 协议同意键名，记录在此便于检索（由 config_flow 写入）
     CONF_AUTO_UPDATE_APP,  # noqa: F401 - 同上：由 config_flow 写入 options，集成侧只读不判
+    CONF_AUTO_UPDATE_CLIENT,
     CONF_BIND_CODE,
     CONF_BINARY_MIRROR,
     CONF_BINARY_SHA256,
@@ -48,6 +49,7 @@ from .const import (
     CONF_LOG_LEVEL,
     CONF_PROTOCOL,
     CONF_SERVER_URL,
+    DEFAULT_AUTO_UPDATE_CLIENT,
     DEFAULT_BINARY_MIRROR,
     DEFAULT_HA_PORT,
     DEFAULT_HEALTH_ADDR,
@@ -69,6 +71,13 @@ from .supervisor import (
     async_install_and_configure,
     async_supervisor_available,
     build_addon_options,
+)
+from .updater import (
+    ISSUE_CLIENT_UPDATE_FAILED,
+    ISSUE_CLIENT_UPDATE_NO_ROLLBACK,
+    ClientBinaryUpdater,
+    resolve_arch,
+    resolve_mirror,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -97,6 +106,12 @@ class HassStoreTunnelRuntimeData:
     client: HassStoreClient
     process: TunnelProcess | None = None
     addon_state: str | None = None
+    # 内置模式的自动更新器（选项开启时由 _start_client_updater 挂上来）。
+    # listener 用它区分"自动更新回写 sha"与"用户手动改 sha"。
+    updater: ClientBinaryUpdater | None = None
+    # 上一次 setup 结束时的 options：用来判断改动是否值得重载集成。
+    # 详见 _async_options_updated。
+    options_snapshot: dict[str, Any] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -193,6 +208,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     entry.async_on_unload(
         hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, _async_shutdown(entry))
     )
+    # options 基线：此后"除 binary_sha256 外没变"的改动不触发重载。
+    entry.runtime_data.options_snapshot = dict(entry.options)
+    # 内置模式：挂上 hs-frpc 自动更新（默认关，用户在选项里开启）。
+    if mode != MODE_ADDON and process is not None:
+        _start_client_updater(hass, entry, client, process)
     _async_notify_setup_result(hass, mode, process, addon_state)
     await _async_check_trusted_proxies(hass, mode)
     _LOGGER.info(
@@ -456,6 +476,8 @@ async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
     在那里停 app 会让"改一次选项"变成一次容器停/启（见其注释）。
     """
     ir.async_delete_issue(hass, DOMAIN, ISSUE_BINARY_INTEGRITY)
+    ir.async_delete_issue(hass, DOMAIN, ISSUE_CLIENT_UPDATE_FAILED)
+    ir.async_delete_issue(hass, DOMAIN, ISSUE_CLIENT_UPDATE_NO_ROLLBACK)
     ir.async_delete_issue(hass, DOMAIN, ISSUE_TRUSTED_PROXIES)
     runtime: HassStoreTunnelRuntimeData | None = getattr(entry, "runtime_data", None)
     # 子进程（local 模式）：unload 正常时会话已收敛，这里再兜一次幂等。
@@ -478,8 +500,67 @@ def _async_shutdown(entry: ConfigEntry) -> Any:
 
 
 async def _async_options_updated(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    """Reload on options change (local_target / protocol / log_level …)."""
+    """Reload on options change (local_target / protocol / log_level …).
+
+    ⚠️ ``binary_sha256`` **由自动更新回写时**豁免重载。回写必经
+    ``hass.config_entries.async_update_entry`` —— 该方法**会**触发所有
+    ``entry.update_listeners``（HA 源码 ``config_entries.py`` 的
+    ``_async_save_and_notify``，已核实；仓库原注释说"不触发 reload"是错的）。
+    在更新过程中重载集成会把刚拉起的隧道重新拆掉，且站点一抖就让 setup 变成
+    ``ConfigEntryNotReady`` → SETUP_RETRY，得不偿失。进程由更新器自己
+    ``async_restart``，所以这里只需要把新校验值落盘。
+
+    但**用户手动改 sha 不能豁免**：options 表单里 binary_sha256 可编辑
+    （开启自动更新时被 updater 独占覆盖，关闭时用户填的就是 pin），只改 sha
+    不重载会让"用户钉版本"静默不生效——这是 1.0.6 的回归。区分依据是
+    updater 记录的 ``last_persisted_sha``（见 updater 模块 docstring）。
+
+    判据用"除 sha 外的键是否变化"而不是布尔标记：后者与用户同时改选项会 race
+    （用户的改动被误吞、集成不重载）。
+    """
+    runtime: HassStoreTunnelRuntimeData | None = getattr(entry, "runtime_data", None)
+    previous = getattr(runtime, "options_snapshot", None) if runtime is not None else None
+    current = dict(entry.options)
+    if runtime is not None:
+        runtime.options_snapshot = current
+    if (
+        previous is not None
+        and _options_without_sha(previous) == _options_without_sha(current)
+        and _sha_write_is_updater(runtime, previous, current)
+    ):
+        _LOGGER.debug(
+            "options 仅 binary_sha256 变化且来自自动更新回写（或未变化），跳过集成重载"
+        )
+        return
     await hass.config_entries.async_reload(entry.entry_id)
+
+
+def _options_without_sha(options: dict[str, Any]) -> dict[str, Any]:
+    """剔除 binary_sha256 后的 options——"这次改动是否值得重载"的判据。"""
+    return {k: v for k, v in options.items() if k != CONF_BINARY_SHA256}
+
+
+def _sha_write_is_updater(
+    runtime: HassStoreTunnelRuntimeData | None,
+    previous: dict[str, Any],
+    current: dict[str, Any],
+) -> bool:
+    """``binary_sha256`` 的这次变化是否来自自动更新回写（而非用户手改）。
+
+    两种情况豁免：
+      * sha 值没变（updater 写入的新值恰好与原值相同的边角）；
+      * 新值 == updater 最近一次写入值（``last_persisted_sha``）。
+    其余一律视为用户手动改动 → 需要重载让新 pin 生效。
+    """
+    new_sha = current.get(CONF_BINARY_SHA256)
+    if new_sha == previous.get(CONF_BINARY_SHA256):
+        return True
+    updater = getattr(runtime, "updater", None) if runtime is not None else None
+    return bool(
+        updater is not None
+        and updater.last_persisted_sha is not None
+        and new_sha == updater.last_persisted_sha
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -695,6 +776,47 @@ async def _async_start_local_side(
     )
     await process.async_start()
     return process
+
+
+def _start_client_updater(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    client: HassStoreClient,
+    process: TunnelProcess,
+) -> None:
+    """挂 hs-frpc 自动更新：发现新版本就下载、校验、原子替换并重启子进程。
+
+    两个前提，缺一不挂任务：**内置运行**模式（app 模式下二进制在容器里，集成
+    碰不到，那由 Supervisor 的 ``auto_update_app`` 管）+ 用户开了选项。
+    用户在选项里改开关会触发重载，任务随之起停，不需要热切换。
+    """
+    if not entry.options.get(CONF_AUTO_UPDATE_CLIENT, DEFAULT_AUTO_UPDATE_CLIENT):
+        return
+    arch = resolve_arch()
+    if arch is None:
+        return
+    updater = ClientBinaryUpdater(
+        hass,
+        entry=entry,
+        client=client,
+        process=process,
+        mirror=resolve_mirror(entry),
+        arch=arch,
+        health_addr=process.health_addr,
+    )
+    # 挂到 runtime_data：options listener 要读 updater.last_persisted_sha
+    # 区分"自动更新回写"与"用户手动改 sha"（见 _async_options_updated）。
+    entry.runtime_data.updater = updater
+    # 后台循环任务；卸载时 cancel。
+    task = hass.async_create_task(
+        updater.async_run_forever(), name=f"{DOMAIN}-client-updater"
+    )
+
+    def _stop_updater() -> None:
+        if not task.done():
+            task.cancel()
+
+    entry.async_on_unload(_stop_updater)
 
 
 def _make_action_handler(process: TunnelProcess) -> Any:

@@ -172,8 +172,14 @@ http:
 `icon@2x.png`），HA 2024.6+ 会在 `brands` 集成里命中 `has_branding` 直接显示，
 无需等待 brands 仓 PR。
 
-如需在 HACS 官方商店 / marketplace 列表里也显示图标，可再把
-`brands/custom_integrations/hassstore_tunnel/` 的 PNG 提到
-<https://github.com/home-assistant/brands> 的 `custom_integrations/` 下
+如需在 HACS 官方商店 / marketplace 列表里也显示图标，可把与本目录同级的
+`brand/icon.png` + `brand/icon@2x.png` 提到
+<https://github.com/home-assistant/brands> 的
+`custom_integrations/hassstore_tunnel/` 下
 （`icon.png` ≥256×256 + `icon@2x.png` ≥512×512，跑 `pytest` 验证后提 PR）。
+
+> 本文件会被 `deploy/tunnel/push-integration.sh` 同步到 GitHub 独立仓库
+> （`hassstore/hassstore_tunnel`），因此这里**不写仓库根相对路径**。
+> HassStore 主仓里的 brands PR 副本在 `assets/brands/custom_integrations/hassstore_tunnel/`，
+> 与上面的 `brand/` 内容一致，改图标时两处都要改。
 
